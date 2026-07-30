@@ -107,6 +107,20 @@ describe('TasksOverview — the table', () => {
     expect(document.querySelector('[data-slot="tasks-table"] table')?.className).not.toContain('min-w-[1040px]')
   })
 
+  it('disables optional headers while workspace column state is loading', () => {
+    const onToggleColumn = vi.fn()
+    renderOverview({
+      columnsPending: true,
+      onToggleColumn,
+      runs: [run({ id: 'pending-columns' })],
+    })
+
+    const branch = screen.getByRole('button', { name: 'Fold Branch column', pressed: true })
+    expect((branch as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(branch)
+    expect(onToggleColumn).not.toHaveBeenCalled()
+  })
+
   it('renders one row per run, in the sidebar order (needs-you first, then recency)', () => {
     renderOverview({
       runs: [

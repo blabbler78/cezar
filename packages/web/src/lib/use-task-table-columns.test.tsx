@@ -72,6 +72,49 @@ afterEach(() => {
 })
 
 describe('useTaskTableColumns', () => {
+  it('does not write before initial state loads, then preserves its nested siblings', async () => {
+    const initial = deferred<Response>()
+    fetchMock.mockImplementation(async (_input, init) => {
+      if (init?.method === 'PUT') {
+        return json({
+          taskTable: {
+            expandedColumns: { branch: true },
+            futureSibling: 'preserve-after-load',
+          },
+        })
+      }
+      return initial.promise
+    })
+    renderHarness()
+
+    expect(screen.getByTestId('loading').textContent).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: 'toggle branch' }))
+    expect(putCalls()).toHaveLength(0)
+
+    initial.resolve(
+      json({
+        taskTable: {
+          expandedColumns: { branch: false },
+          futureSibling: 'preserve-after-load',
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('false'))
+    fireEvent.click(screen.getByRole('button', { name: 'toggle branch' }))
+
+    const put = await waitFor(() => {
+      const call = putCalls()[0]
+      if (!call) throw new Error('PUT not started')
+      return call
+    })
+    expect(JSON.parse(String(put[1]?.body))).toEqual({
+      taskTable: {
+        expandedColumns: { branch: true },
+        futureSibling: 'preserve-after-load',
+      },
+    })
+  })
+
   it('updates optimistically and writes the whole taskTable with keepalive', async () => {
     let stored = {
       futureTopLevel: true,

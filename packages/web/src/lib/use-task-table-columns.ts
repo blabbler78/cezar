@@ -47,6 +47,10 @@ export function useTaskTableColumns(): {
       if (!TASK_COLUMNS.find((column) => column.id === id)?.canFold) return
 
       const current = queryClient.getQueryData<WorkspaceUiState>(workspaceQueryKeys.uiState)
+      // A shallow taskTable write can only preserve forward-compatible siblings after the
+      // authoritative GET has populated the cache. The route also disables its controls while
+      // this is undefined, but keep the controller safe for every caller and failed-query path.
+      if (current === undefined) return
       const currentTaskTable = asRecord(current?.taskTable)
       const taskTable = {
         ...currentTaskTable,

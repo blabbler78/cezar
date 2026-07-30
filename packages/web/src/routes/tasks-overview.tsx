@@ -86,6 +86,7 @@ export function TasksOverview({
   showCost = true,
   expandedColumns = normalizeExpandedColumns(undefined),
   onToggleColumn = () => undefined,
+  columnsPending = false,
 }: {
   /** Undefined while `/api/runs` has not answered: the header renders, the body stays empty —
    *  an empty state before we know there are no runs would be a lie. */
@@ -104,6 +105,8 @@ export function TasksOverview({
   /** Workspace-global desktop column choices; absent ids use registry defaults. */
   expandedColumns?: NormalizedExpandedColumns
   onToggleColumn?: (id: TaskColumnId) => void
+  /** Prevent a shallow write before the authoritative workspace state can preserve siblings. */
+  columnsPending?: boolean
 }) {
   const [query, setQuery] = React.useState('')
   const all = runs ?? []
@@ -193,6 +196,7 @@ export function TasksOverview({
                           column={column}
                           expanded={isColumnExpanded(column.id, expandedColumns)}
                           onToggle={onToggleColumn}
+                          disabled={columnsPending}
                         />
                       ))}
                     </tr>
@@ -377,10 +381,12 @@ function TaskColumnHeader({
   column,
   expanded,
   onToggle,
+  disabled,
 }: {
   column: TaskColumnDefinition
   expanded: boolean
   onToggle: (id: TaskColumnId) => void
+  disabled: boolean
 }) {
   if (!column.canFold) {
     return (
@@ -399,9 +405,10 @@ function TaskColumnHeader({
             type="button"
             aria-label={`${action} ${column.label} column`}
             aria-pressed={expanded}
+            disabled={disabled}
             onClick={() => onToggle(column.id)}
             className={cn(
-              'inline-flex h-8 w-full items-center gap-1 rounded-sm px-0.5 text-inherit outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50',
+              'inline-flex h-8 w-full items-center gap-1 rounded-sm px-0.5 text-inherit outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-wait disabled:opacity-60',
               column.align === 'right' ? 'justify-end' : 'justify-start',
               !expanded && 'justify-center px-0',
             )}
@@ -868,6 +875,7 @@ export function TasksOverviewRoute() {
       showCost={metricVisibility.cost}
       expandedColumns={taskTableColumns.expandedColumns}
       onToggleColumn={taskTableColumns.toggleColumn}
+      columnsPending={taskTableColumns.isPending}
     />
   )
 }

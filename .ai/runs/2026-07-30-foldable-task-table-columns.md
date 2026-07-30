@@ -44,6 +44,8 @@ Let users fold optional columns in the desktop Tasks table, with Branch folded b
 
 ## Progress
 
+PR: #743
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Complete persisted foldable-column capability
@@ -53,4 +55,4 @@ Let users fold optional columns in the desktop Tasks table, with Branch folded b
 - [x] 1.3 Add the optimistic serialized workspace persistence controller with lifecycle and failure coverage. — 96540194
 - [x] 1.4 Refactor the desktop Tasks table to render accessible registry-driven foldable columns. — 1a5640af
 - [x] 1.5 Extend Tasks overview behavior, alignment, capability, queued-row, and mobile tests. — 74703f5e
-- [ ] 1.6 Run the full validation gate and capture production UI evidence for fresh and persisted states.
+- [x] 1.6 Run the full validation gate and capture production UI evidence for fresh and persisted states. — 68ebb0a1

@@ -52,5 +52,5 @@ Let users fold optional columns in the desktop Tasks table, with Branch folded b
 - [x] 1.2 Add the task-column registry and pure state helpers with unit coverage. — c68d3e79
 - [x] 1.3 Add the optimistic serialized workspace persistence controller with lifecycle and failure coverage. — 96540194
 - [x] 1.4 Refactor the desktop Tasks table to render accessible registry-driven foldable columns. — 1a5640af
-- [ ] 1.5 Extend Tasks overview behavior, alignment, capability, queued-row, and mobile tests.
+- [x] 1.5 Extend Tasks overview behavior, alignment, capability, queued-row, and mobile tests. — 74703f5e
 - [ ] 1.6 Run the full validation gate and capture production UI evidence for fresh and persisted states.

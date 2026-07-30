@@ -54,6 +54,7 @@ function renderOverview(props: Partial<ComponentProps<typeof TasksOverview>> = {
               runs={[]}
               view="active"
               now={NOW}
+              expandedColumns={{ branch: true }}
               {...props}
               onViewChange={onViewChange}
               onArchiveFinished={onArchiveFinished}
@@ -77,6 +78,34 @@ const cellsOf = (id: string): string[] => [...(tableRow(id)?.querySelectorAll('t
 afterEach(cleanup)
 
 describe('TasksOverview — the table', () => {
+  it('starts with Branch folded while keeping fixed columns and an in-place restore control', () => {
+    const onToggleColumn = vi.fn()
+    renderOverview({
+      expandedColumns: {},
+      onToggleColumn,
+      runs: [run({ id: 'fresh', branch: 'feat/fresh-workspace' })],
+    })
+
+    const branchHeader = document.querySelector<HTMLElement>('th[data-column-id="branch"]')
+    expect(branchHeader?.getAttribute('data-folded')).toBe('true')
+    const restore = within(branchHeader as HTMLElement).getByRole('button', {
+      name: 'Expand Branch column',
+      pressed: false,
+    })
+    expect(restore.tagName).toBe('BUTTON')
+    fireEvent.click(restore)
+    expect(onToggleColumn).toHaveBeenCalledWith('branch')
+
+    expect(tableRow('fresh')?.querySelector('td[data-column-id="branch"]')?.textContent).toBe('')
+    expect(tableRow('fresh')?.querySelector('td[data-column-id="branch"]')?.getAttribute('aria-hidden')).toBe(
+      'true',
+    )
+    expect(document.querySelector('col[data-column-id="branch"]')?.getAttribute('style')).toContain('42px')
+    expect(document.querySelector('th[data-column-id="status"] button')).toBeNull()
+    expect(document.querySelector('th[data-column-id="task"] button')).toBeNull()
+    expect(document.querySelector('[data-slot="tasks-table"] table')?.className).not.toContain('min-w-[1040px]')
+  })
+
   it('renders one row per run, in the sidebar order (needs-you first, then recency)', () => {
     renderOverview({
       runs: [

@@ -95,6 +95,7 @@ describe('TasksOverview — the table', () => {
     expect(restore.tagName).toBe('BUTTON')
     fireEvent.click(restore)
     expect(onToggleColumn).toHaveBeenCalledWith('branch')
+    expect(location()).toBe('/')
 
     expect(tableRow('fresh')?.querySelector('td[data-column-id="branch"]')?.textContent).toBe('')
     expect(tableRow('fresh')?.querySelector('td[data-column-id="branch"]')?.getAttribute('aria-hidden')).toBe(
@@ -232,6 +233,76 @@ describe('TasksOverview — the table', () => {
     expect(queued.querySelector('[data-slot="queue-note"]')?.getAttribute('colspan')).toBe('2')
     expect(queued.textContent).not.toContain('12.0k')
     expect(queued.textContent).not.toContain('$0.02')
+  })
+
+  it('keeps headers and normal/queued rows logically aligned when several columns are folded', () => {
+    renderOverview({
+      expandedColumns: { branch: false, workflow: false, cpu: false, memory: false },
+      runs: [
+        run({ id: 'aligned', branch: 'feat/aligned' }),
+        run({ id: 'aligned-queue', status: 'queued', branch: 'feat/queued' }),
+      ],
+    })
+
+    const headerIds = [...document.querySelectorAll('[data-slot="tasks-table"] th')].map((header) =>
+      header.getAttribute('data-column-id'),
+    )
+    const logicalRowIds = (id: string) =>
+      [...(tableRow(id)?.querySelectorAll('td') ?? [])].flatMap((cell) =>
+        cell.getAttribute('data-column-id') === 'cpu-memory'
+          ? ['cpu', 'memory']
+          : [cell.getAttribute('data-column-id')],
+      )
+
+    expect(logicalRowIds('aligned')).toEqual(headerIds)
+    expect(logicalRowIds('aligned-queue')).toEqual(headerIds)
+    expect(tableRow('aligned-queue')?.querySelector('[data-slot="queue-note"]')?.getAttribute('colspan')).toBe('2')
+    expect(document.querySelector('th[data-column-id="cpu"]')?.getAttribute('data-folded')).toBe('true')
+    expect(document.querySelector('th[data-column-id="memory"]')?.getAttribute('data-folded')).toBe('true')
+  })
+
+  it('uses action-oriented names and pressed state on every optional header', () => {
+    renderOverview({
+      expandedColumns: { workflow: false, branch: true },
+      runs: [run({ id: 'accessible' })],
+    })
+
+    expect(screen.getByRole('button', { name: 'Expand Workflow column', pressed: false })).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Fold Branch column', pressed: true })).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Fold CPU column', pressed: true })).not.toBeNull()
+    expect(document.querySelectorAll('[data-slot="tasks-table"] thead button')).toHaveLength(9)
+    expect(document.querySelector('th[data-column-id="status"]')?.textContent).toBe('Status')
+    expect(document.querySelector('th[data-column-id="task"]')?.textContent).toBe('Task')
+  })
+
+  it('does not render capability-hidden columns or disturb their saved choices', () => {
+    const expandedColumns = { tokens: false, cost: false, branch: true } as const
+    renderOverview({
+      expandedColumns,
+      showTokens: false,
+      showCost: false,
+      runs: [run({ id: 'capability-hidden', inputTokens: 123, costUsd: 0.42 })],
+    })
+
+    expect(document.querySelector('th[data-column-id="tokens"]')).toBeNull()
+    expect(document.querySelector('th[data-column-id="cost"]')).toBeNull()
+    expect(tableRow('capability-hidden')?.querySelector('td[data-column-id="tokens"]')).toBeNull()
+    expect(tableRow('capability-hidden')?.querySelector('td[data-column-id="cost"]')).toBeNull()
+    expect(expandedColumns).toEqual({ tokens: false, cost: false, branch: true })
+  })
+
+  it('reuses the same folded state for archived rows and filtered results', () => {
+    renderOverview({
+      view: 'archived',
+      expandedColumns: { workflow: false, branch: false },
+      runs: [run({ id: 'archived-folded', archived: true, title: 'Needle task', workflow: 'autofix' })],
+    })
+
+    expect(screen.getByRole('button', { name: 'Expand Workflow column', pressed: false })).not.toBeNull()
+    expect(tableRow('archived-folded')?.querySelector('td[data-column-id="workflow"]')?.textContent).toBe('')
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search tasks' }), { target: { value: 'needle' } })
+    expect(tableRow('archived-folded')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Expand Workflow column', pressed: false })).not.toBeNull()
   })
 
   it.each([
@@ -609,6 +680,18 @@ describe('TasksOverview — empty and loading states', () => {
 })
 
 describe('TasksOverview — mobile cards and FAB', () => {
+  it('keeps mobile metadata unchanged when its desktop columns are folded', () => {
+    renderOverview({
+      expandedColumns: { workflow: false, branch: false },
+      runs: [run({ id: 'folded-mobile', workflow: 'autofix', branch: 'feat/mobile-stays' })],
+    })
+
+    expect(tableRow('folded-mobile')?.querySelector('td[data-column-id="workflow"]')?.textContent).toBe('')
+    expect(tableRow('folded-mobile')?.querySelector('td[data-column-id="branch"]')?.textContent).toBe('')
+    expect(card('folded-mobile')?.textContent).toContain('autofix')
+    expect(card('folded-mobile')?.textContent).toContain('feat/mobile-stays')
+  })
+
   it('renders the same runs as cards, in the same order', () => {
     renderOverview({
       runs: [
@@ -769,6 +852,13 @@ describe('TasksOverviewRoute — wired to the app', () => {
     )
   }
 
+  function json(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
   const sidebarTab = (view: string) =>
     document.querySelector(`[data-slot="view-tab"][data-view="${view}"]`) as HTMLElement
   const overviewTab = (view: string) =>
@@ -793,6 +883,67 @@ describe('TasksOverviewRoute — wired to the app', () => {
     expect(overviewTab('active').getAttribute('aria-pressed')).toBe('true')
     expect(tableRow('act')).not.toBeNull()
     expect(tableRow('arc')).toBeNull()
+  })
+
+  it('adopts persisted workspace choices, updates optimistically, and reloads the server answer', async () => {
+    let workspaceState = {
+      taskTable: {
+        expandedColumns: { branch: false },
+        futureSibling: 'preserve',
+      },
+    }
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url === '/api/v1/workspace/ui-state') {
+        if (init?.method === 'PUT') {
+          workspaceState = { ...workspaceState, ...JSON.parse(String(init.body)) }
+        }
+        return json(workspaceState)
+      }
+      if (url === '/api/v1/runs') return json([run({ id: 'persisted', branch: 'feat/persisted' })])
+      return json({})
+    })
+
+    const first = render(
+      <QueryClientProvider client={createQueryClient()}>
+        <MemoryRouter>
+          <ListViewProvider>
+            <TasksOverviewRoute />
+          </ListViewProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    const restore = await screen.findByRole('button', { name: 'Expand Branch column', pressed: false })
+    restore.focus()
+    fireEvent.click(restore)
+    const fold = await screen.findByRole('button', { name: 'Fold Branch column', pressed: true })
+    expect(document.activeElement).toBe(fold)
+    const put = await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([path, options]) => String(path) === '/api/v1/workspace/ui-state' && options?.method === 'PUT',
+      )
+      if (!call) throw new Error('workspace PUT missing')
+      return call
+    })
+    expect(JSON.parse(String(put[1]?.body))).toEqual({
+      taskTable: {
+        expandedColumns: { branch: true },
+        futureSibling: 'preserve',
+      },
+    })
+    expect(put[1]?.keepalive).toBe(true)
+
+    first.unmount()
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <MemoryRouter>
+          <ListViewProvider>
+            <TasksOverviewRoute />
+          </ListViewProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByRole('button', { name: 'Fold Branch column', pressed: true })).not.toBeNull()
   })
 
   it('posts to /api/v1/runs/archive-finished and refetches the authoritative list', async () => {

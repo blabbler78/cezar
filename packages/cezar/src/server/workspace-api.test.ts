@@ -342,6 +342,43 @@ describe('the workspace settings API (step 2.7)', () => {
     expect(await (await apiRequest(app, '/api/v1/ui-state')).json()).toEqual({});
   });
 
+  it('round-trips task-table choices and preserves unknown nested siblings', async () => {
+    const res = await putUiState({
+      taskTable: {
+        expandedColumns: { branch: false, workflow: true, futureColumn: false },
+        futurePreference: { compact: true },
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      taskTable: {
+        expandedColumns: { branch: false, workflow: true, futureColumn: false },
+        futurePreference: { compact: true },
+      },
+    });
+    expect(rawUiState()).toEqual({
+      taskTable: {
+        expandedColumns: { branch: false, workflow: true, futureColumn: false },
+        futurePreference: { compact: true },
+      },
+    });
+  });
+
+  it.each([
+    ['a non-boolean value', { branch: 'yes' }],
+    ['an empty id', { '': true }],
+    ['an overlong id', { ['x'.repeat(65)]: true }],
+    [
+      'more than 50 entries',
+      Object.fromEntries(Array.from({ length: 51 }, (_, index) => [`column-${index}`, true])),
+    ],
+  ])('rejects task-table expanded columns with %s without writing state', async (_case, expandedColumns) => {
+    const res = await putUiState({ taskTable: { expandedColumns } });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toHaveProperty('error');
+    expect(() => readFileSync(workspaceUiStatePath(), 'utf8')).toThrow();
+  });
+
   // Every Settings → Appearance preference has to be listed in `appearanceSchema`: the top-level
   // `.passthrough()` does NOT reach inside `appearance`, so an unlisted key is stripped here and
   // then wiped from the file by the shallow merge. The cockpit adopts this response as

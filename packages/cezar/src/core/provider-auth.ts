@@ -470,7 +470,8 @@ export class ProviderAuthService {
    * per provider — the discovered default — so `GET /api/v1/providers/status` is byte-identical
    * for anyone with no extra accounts. Per-account rows are carried by the agent-profiles route.
    *
-   * Cached on the same 5s TTL, keyed by `(provider, profileId)` so two Claude accounts never read
+   * Cached on the same asymmetric lifetime as `status()` (`cacheTtlFor`: minutes for a connected
+   * answer, a minute for anything else), keyed by `(provider, profileId)` so two Claude accounts never read
    * each other's answer. The runtime-auth latch is deliberately NOT applied: it is a coarse
    * per-provider signal and stamping it onto every account of that provider would mark an
    * untouched account as broken.

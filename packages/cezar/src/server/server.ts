@@ -96,6 +96,7 @@ import {
   CONTROL_CHARS_RE,
   DEFAULT_AGENT_ACCOUNT_ID,
   defaultAgentAccountStore,
+  isAbsoluteConfigDir,
   loadAgentAccounts,
   mergeWriteAgentAccounts,
   type AgentAccount,
@@ -1907,8 +1908,10 @@ export function createApp(deps: ServerDeps) {
     if (CONTROL_CHARS_RE.test(configDir)) return 'folder must not contain control characters';
     const expanded = expandTilde(configDir);
     // Absolute after expansion: a relative dir would resolve against whatever cwd the agent
-    // happens to be spawned in, which for a task is a throwaway worktree.
-    if (!expanded.startsWith('/')) return `folder must be an absolute path: ${configDir}`;
+    // happens to be spawned in, which for a task is a throwaway worktree. Through
+    // `isAbsoluteConfigDir`, never a leading-`/` test — see its note: a string test refuses every
+    // real Windows path, and this is the only gate the Add-account dialog has.
+    if (!isAbsoluteConfigDir(expanded)) return `folder must be an absolute path: ${configDir}`;
     return null;
   };
 
@@ -2081,7 +2084,9 @@ export function createApp(deps: ServerDeps) {
      *
      * Separate from the listing because a probe shells out to an agent CLI: keeping it here lets
      * the pane paint immediately and fill each row in as its answer lands, instead of every cold
-     * load blocking on N spawns. `refresh=1` bypasses the 5s cache for the "Check again" affordance.
+     * load blocking on N spawns. `refresh=1` drops this account's cached answer and re-probes, for
+     * the "Check again" affordance — the cache itself holds a connected answer for minutes and an
+     * unsettled one for a minute (`cacheTtlFor` in `core/provider-auth.ts`).
      */
     .get(
       '/workspace/agent-profiles/:id/status',

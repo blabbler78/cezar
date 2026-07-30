@@ -1,4 +1,14 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +16,7 @@ import { agentAccountsPath, workspaceConfigPath } from '../paths.ts';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.ts';
 import {
   defaultAgentAccountStore,
+  isAbsoluteConfigDir,
   loadAgentAccounts,
   mergeWriteAgentAccounts,
   selectionFor,
@@ -249,6 +260,58 @@ describe('agent accounts store', () => {
       expect(selectionFor(store, '/repo', 'codex')).toBeUndefined();
       expect(selectionFor(store, '/elsewhere', 'claude')).toBeUndefined();
       expect(selectionFor(store, undefined, 'claude')).toBeUndefined();
+    });
+
+    // The keys come from the REGISTRY, which realpath-normalizes every root it stores; the readers
+    // hold whatever spelling their caller had (`RunManager` gets `repoInfo?.root ?? cwd` for the
+    // boot project, not the registry entry). A raw string compare drops the selection silently and
+    // the run bills the discovered account instead — the one failure this feature exists to
+    // prevent. `workspace/semaphore.ts` normalizes at lookup for the same reason; a real symlink is
+    // the only way to prove it.
+    it('resolves a symlinked spelling of the root the registry stored', async () => {
+      const real = join(home, 'real-repo');
+      const link = join(home, 'linked-repo');
+      mkdirSync(real);
+      symlinkSync(real, link);
+      write({ accounts: [account('work')], selections: { [realpathSync(real)]: { claude: 'work' } } });
+      const store = await loadAgentAccounts();
+
+      expect(selectionFor(store, realpathSync(real), 'claude')).toBe('work');
+      expect(selectionFor(store, link, 'claude')).toBe('work');
+    });
+
+    it('still answers the machine-wide default for a root nobody chose', async () => {
+      write({ accounts: [account('work')], defaults: { claude: 'work' } });
+      const store = await loadAgentAccounts();
+      expect(selectionFor(store, '/never-registered', 'claude')).toBe('work');
+    });
+  });
+
+  /**
+   * The account routes' only path rule. It was a leading-`/` test, which refuses every real Windows
+   * path — while `core/shell-env.ts` renders `set "VAR=v"` for `cmd.exe` specifically so an account
+   * survives a Windows terminal handoff, and the Add-account dialog delegates all path validation to
+   * the server. Both platforms are asserted here so neither can regress from the other's machine.
+   */
+  describe('isAbsoluteConfigDir', () => {
+    it('accepts a Windows drive path on Windows, where it is the only spelling there is', () => {
+      expect(isAbsoluteConfigDir('C:\\Users\\me\\.claude-work', 'win32')).toBe(true);
+      expect(isAbsoluteConfigDir('\\\\server\\share\\claude', 'win32')).toBe(true);
+    });
+
+    it('accepts a POSIX path on POSIX', () => {
+      expect(isAbsoluteConfigDir('/home/me/.claude-work', 'linux')).toBe(true);
+      expect(isAbsoluteConfigDir('/Users/me/.claude-work', 'darwin')).toBe(true);
+    });
+
+    it('still refuses a relative dir on either platform — it would resolve against a throwaway worktree', () => {
+      expect(isAbsoluteConfigDir('.claude-work', 'win32')).toBe(false);
+      expect(isAbsoluteConfigDir('.claude-work', 'darwin')).toBe(false);
+      expect(isAbsoluteConfigDir('~/.claude-work', 'darwin')).toBe(false);
+    });
+
+    it('does not accept a Windows path on POSIX, where it really is relative', () => {
+      expect(isAbsoluteConfigDir('C:\\Users\\me\\.claude-work', 'darwin')).toBe(false);
     });
   });
 });

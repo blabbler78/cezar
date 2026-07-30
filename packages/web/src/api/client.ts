@@ -895,12 +895,15 @@ export async function removeProject(projectId: string): Promise<RemoveProjectRes
 }
 
 /**
- * Set or clear a project's personal, per-machine overrides
- * (`PATCH /api/v1/projects/:projectId`). `maxParallel: null` clears the
- * concurrency override back to "inherit the workspace cap" (spec 2026-07-22);
- * `agentProfile: {<provider>: null}` clears an agent account back to the
- * discovered default (spec 2026-07-29). The body is partial — send only what
- * changed — and the answer is the updated entry the pane swaps into its list.
+ * Set or clear a project's per-project concurrency ceiling
+ * (`PATCH /api/v1/projects/:projectId`, spec 2026-07-22). `maxParallel: null`
+ * clears the override back to "inherit the workspace cap"; an integer pins it.
+ * The server applies the new ceiling live (semaphore refresh), so the answer is
+ * the updated entry the pane swaps into its list.
+ *
+ * Deliberately NOT where a project's agent account is set — that is
+ * `selectAgentProfile` (`PUT /api/v1/workspace/agent-profiles/selection`), so
+ * the selection is stored beside the accounts it names.
  */
 export async function updateProject(
   projectId: string,
@@ -1450,7 +1453,7 @@ export async function createAgentProfile(
 
 /** One account's auth state, probed for real (spec 2026-07-29-agent-profiles). Off the listing on
  *  purpose: a probe shells out to an agent CLI, so the pane paints first and fills rows in as these
- *  land. `refresh` bypasses the server's 5s cache. */
+ *  land. `refresh` drops the server's cached answer for this account and re-probes. */
 export async function getAgentAccountStatus(
   routeId: string,
   opts?: ReadOptions & { refresh?: boolean },

@@ -1,4 +1,6 @@
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { posix, resolve, win32 } from 'node:path';
 import { z } from 'zod';
 import { DEFAULT_AGENT_ACCOUNT_ID } from '@open-mercato/cezar-contract';
 import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
@@ -52,6 +54,27 @@ export const AGENT_ACCOUNT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
  * for the two sides to drift apart silently.
  */
 export { DEFAULT_AGENT_ACCOUNT_ID };
+
+/**
+ * Is `configDir` absolute on `platform`? The account routes' only path rule, and the reason it is a
+ * named function rather than a test written inline.
+ *
+ * A relative dir would resolve against whatever cwd the agent happens to be spawned in — for a task
+ * that is a throwaway worktree — so it has to be refused. But the obvious spelling of that refusal,
+ * a leading-`/` test, refuses every real Windows path too: `C:\Users\me\.claude-work` starts with
+ * neither `/` nor `~`. That is not a corner case: `core/shell-env.ts` renders `set "VAR=v"` for
+ * `cmd.exe` precisely so an account survives a Windows terminal handoff, and the Add-account dialog
+ * delegates ALL path validation to the server, so a string test would leave the whole feature
+ * unreachable on the one platform the rest of this work went out of its way to support.
+ *
+ * `platform` is a parameter so both answers stay testable from either OS.
+ */
+export function isAbsoluteConfigDir(
+  configDir: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return (platform === 'win32' ? win32 : posix).isAbsolute(configDir);
+}
 
 /** C0 controls + DEL. A path containing one is never legitimate and would be interpolated into a
  *  shell command by the CLI handoff, so it is refused at the schema, not just at the route. */
@@ -249,6 +272,42 @@ export function selectionFor(
   repoRoot: string | undefined,
   provider: ProviderId,
 ): string | undefined {
-  const chosen = repoRoot === undefined ? undefined : store.selections[repoRoot]?.[provider];
+  const chosen = repoRoot === undefined ? undefined : selectionForRoot(store, repoRoot)?.[provider];
   return chosen ?? store.defaults[provider];
+}
+
+/**
+ * The selection stored for `repoRoot`, matched on the literal spelling first and the realpath'd
+ * one second.
+ *
+ * The keys come from the REGISTRY, which realpath-normalizes every root it stores
+ * (`workspace/projects.ts` `normalizeRoot`); the readers hold whatever spelling their caller had —
+ * `RunManager` is constructed with `repoInfo?.root ?? cwd` for the boot project, not with the
+ * registry entry. `workspace/semaphore.ts` already normalizes at lookup for the per-project
+ * concurrency map for exactly this reason. Doing it here too matters more, not less: a missed
+ * concurrency override runs the task with the wrong ceiling, a missed account selection runs it on
+ * the wrong subscription and says nothing.
+ *
+ * The literal probe comes first because it is free and answers the overwhelmingly common case; the
+ * normalized one only pays a `realpathSync` when the literal key is absent.
+ */
+function selectionForRoot(
+  store: Pick<AgentAccountStore, 'selections'>,
+  repoRoot: string,
+): AgentAccountSelection | undefined {
+  const literal = store.selections[repoRoot];
+  if (literal !== undefined) return literal;
+  const normalized = normalizeRootSync(repoRoot);
+  return normalized === repoRoot ? undefined : store.selections[normalized];
+}
+
+/** Realpath-normalize a root the way the registry does, but synchronously — this answers a run's
+ *  per-step lookup and must not `await`. A path that cannot be realpath'd (gone, unreadable)
+ *  degrades to `resolve()`, matching the registry's own fallback and `semaphore.ts`'s. */
+function normalizeRootSync(root: string): string {
+  try {
+    return realpathSync(root);
+  } catch {
+    return resolve(root);
+  }
 }

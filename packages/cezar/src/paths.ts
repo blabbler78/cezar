@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { AgentHomePaths } from './agent-config/catalog.ts';
 
 /**
@@ -82,6 +82,24 @@ export function workspaceUiStatePath(): string {
 }
 
 /**
+ * Agent accounts — extra config dirs for a second login of the same agent CLI, plus which one
+ * each project uses (spec `2026-07-29-agent-profiles.md`).
+ *
+ * Its OWN file rather than a key in `config.json`, and that is the whole point: a cezar version
+ * that has never heard of accounts does not open this file, so it cannot drop them. Living in
+ * `config.json` made their survival depend on a `.passthrough()` in *another version's* source —
+ * a guarantee this repo cannot make on behalf of a build the user might switch to, and one that
+ * evaporates entirely the moment any version fails to parse that file and degrades to defaults
+ * (the next merge-write then rewrites it without them).
+ *
+ * The per-project selections live here too, beside the accounts they name, so deleting an account
+ * and scrubbing every reference to it stays ONE atomic write.
+ */
+export function agentAccountsPath(): string {
+  return join(cezarHomeDir(), 'agent-accounts.json');
+}
+
+/**
  * Expand a leading `~` to the user's home. Lives here with the other homedir
  * logic (see the module note above — one place owns `homedir()`): the
  * workspace browse/checkout roots are stored as the user wrote them (a literal `~`), so
@@ -107,16 +125,36 @@ export function serverLockPath(instance: string = DEFAULT_SERVER_INSTANCE): stri
 
 /**
  * Where each coding agent keeps its per-user config, honouring the env vars the
- * vendors document: `$CODEX_HOME` relocates Codex's home; `$XDG_CONFIG_HOME`
- * relocates OpenCode's config dir (falling back to `~/.config`). Claude's `~/.claude`
- * has no documented override. Read per call so tests and ops can set env live.
+ * vendors document: `$CLAUDE_CONFIG_DIR` relocates Claude Code's home;
+ * `$CODEX_HOME` relocates Codex's; `$XDG_CONFIG_HOME` relocates OpenCode's config
+ * dir (falling back to `~/.config`). Read per call so tests and ops can set env live.
+ *
+ * These are the DEFAULT profile's dirs. A second login of the same CLI is an
+ * agent profile (`src/core/agent-profiles.ts`) and resolves through
+ * `agentHomePathsForProfiles` instead — what this function answers is what the
+ * host is configured for when nothing overrides it.
  */
 export function agentHomePaths(env: NodeJS.ProcessEnv = process.env): AgentHomePaths {
   const home = env.HOME || env.USERPROFILE || homedir();
   const xdgConfig = env.XDG_CONFIG_HOME?.trim() || join(home, '.config');
   return {
-    claude: join(home, '.claude'),
+    claude: env.CLAUDE_CONFIG_DIR?.trim() || join(home, '.claude'),
     codex: env.CODEX_HOME?.trim() || join(home, '.codex'),
     opencodeConfig: join(xdgConfig, 'opencode'),
   };
+}
+
+/**
+ * Where Claude Code keeps `.claude.json` — its MCP/state file — for a given
+ * config dir. The location is NOT uniform: by default the file is a SIBLING of
+ * `~/.claude`, but under a `CLAUDE_CONFIG_DIR` override it moves INSIDE the
+ * overridden dir (verified against the shipped CLI 2026-07-29, and against a
+ * real second-account dir on disk). Reading it from `dirname(configDir)`
+ * unconditionally — as this repo did — lands on `~/.claude.json` for a
+ * `~/.claude-klaudiusz` profile, i.e. the wrong account's file.
+ */
+export function claudeStateFilePath(claudeHome: string, env: NodeJS.ProcessEnv = process.env): string {
+  const overridden = (env.CLAUDE_CONFIG_DIR?.trim() || '') !== ''
+    || claudeHome !== join(env.HOME || env.USERPROFILE || homedir(), '.claude');
+  return overridden ? join(claudeHome, '.claude.json') : join(dirname(claudeHome), '.claude.json');
 }

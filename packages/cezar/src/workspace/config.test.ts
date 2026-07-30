@@ -287,4 +287,5 @@ describe('workspace config', () => {
     expect(written.projectsDir).toBe('/srv/checkouts');
     expect((await loadWorkspaceConfig()).projectsDir).toBe('/srv/checkouts');
   });
+
 });

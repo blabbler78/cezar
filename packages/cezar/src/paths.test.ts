@@ -5,6 +5,7 @@ import {
   DEFAULT_SERVER_INSTANCE,
   agentHomePaths,
   cezarHomeDir,
+  claudeStateFilePath,
   instanceSlug,
   serverInstancesDir,
   serverLockPath,
@@ -97,15 +98,41 @@ describe('agentHomePaths', () => {
   it('honors agent-specific home overrides', () => {
     const paths = agentHomePaths({
       HOME: '/home/u',
+      CLAUDE_CONFIG_DIR: '/opt/claude-klaudiusz',
       CODEX_HOME: '/opt/codex',
       XDG_CONFIG_HOME: '/xdg',
     } as NodeJS.ProcessEnv);
+    expect(paths.claude).toBe('/opt/claude-klaudiusz');
     expect(paths.codex).toBe('/opt/codex');
     expect(paths.opencodeConfig).toBe('/xdg/opencode');
+  });
+
+  it('ignores a blank CLAUDE_CONFIG_DIR rather than yielding a relative path', () => {
+    const paths = agentHomePaths({ HOME: '/home/u', CLAUDE_CONFIG_DIR: '   ' } as NodeJS.ProcessEnv);
+    expect(paths.claude).toBe('/home/u/.claude');
   });
 
   it('falls back to USERPROFILE when HOME is unset', () => {
     const paths = agentHomePaths({ USERPROFILE: 'C:\\Users\\u' } as unknown as NodeJS.ProcessEnv);
     expect(paths.claude).toContain('.claude');
+  });
+});
+
+describe('claudeStateFilePath', () => {
+  it('is a SIBLING of the default ~/.claude', () => {
+    const env = { HOME: '/home/u' } as NodeJS.ProcessEnv;
+    expect(claudeStateFilePath(agentHomePaths(env).claude, env)).toBe('/home/u/.claude.json');
+  });
+
+  it('moves INSIDE an overridden config dir', () => {
+    const env = { HOME: '/home/u', CLAUDE_CONFIG_DIR: '/home/u/.claude-klaudiusz' } as NodeJS.ProcessEnv;
+    expect(claudeStateFilePath(agentHomePaths(env).claude, env)).toBe('/home/u/.claude-klaudiusz/.claude.json');
+  });
+
+  it('moves inside for a profile dir passed explicitly, with no env override', () => {
+    // The agent-profile path: the env still says "default", but the caller resolved
+    // a second account's dir. Reading `dirname()` here would hit the WRONG account's file.
+    const env = { HOME: '/home/u' } as NodeJS.ProcessEnv;
+    expect(claudeStateFilePath('/home/u/.claude-klaudiusz', env)).toBe('/home/u/.claude-klaudiusz/.claude.json');
   });
 });

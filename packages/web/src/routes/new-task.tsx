@@ -215,12 +215,13 @@ export function NewTaskRoute() {
   const displayRunner = runner ?? preferredRunner
   const providersReady = providers.isSuccess && runners.length > 0
   const catalog = useRunnerModels()
+  const modelsLocked = config.data?.modelsLocked === true
   const models = runner === null
     ? []
     : modelsForRunner(runner, catalog.data, [draft.model, config.data?.defaultModels?.[runner]])
   const model = runner === null
     ? ''
-    : resolveModel(draft.model, runner, config.data?.defaultModels, catalog.data)
+    : resolveModel(modelsLocked ? null : draft.model, runner, config.data?.defaultModels, catalog.data)
   // Agent accounts (spec 2026-07-29-agent-profiles). These are rows of the RUNNER pill rather than
   // a pill of their own — `claude · Default` / `claude · Klaudiusz` / `codex` — so what will run is
   // readable at a glance instead of assembled from two controls. An agent with a single login stays
@@ -443,6 +444,7 @@ export function NewTaskRoute() {
         task: text,
         source,
         model,
+        modelsLocked,
         runner,
         runnerExplicit: draft.runner !== null,
         agentProfile,
@@ -494,6 +496,7 @@ export function NewTaskRoute() {
           task: plan.task,
           steps: plan.steps,
           model,
+          modelsLocked,
           runner,
           runnerExplicit: draft.runner !== null,
           defaultRunner,
@@ -639,6 +642,12 @@ export function NewTaskRoute() {
                 label={models.find((m) => m.id === model)?.label ?? 'auto'}
                 value={model}
                 disabled={!providersReady}
+                readOnly={modelsLocked}
+                disabledHint={
+                  modelsLocked
+                    ? 'Model selection is locked to native coding-agent settings.'
+                    : undefined
+                }
                 onPick={(next) => update({ model: next })}
                 options={models.map((m) => ({ value: m.id, label: m.label, desc: m.desc }))}
                 status={modelCatalogStatus(displayRunner, catalog.data, catalog.isError)}

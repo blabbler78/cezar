@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { AGENT_MODELS_LOCKED_ENV } from './agent-model-policy.ts';
 import { profileEnv } from './agent-profiles.ts';
 import { withEnvPrefix } from './shell-env.ts';
 
@@ -44,6 +45,20 @@ export type RunProviderCommand = (
    *  three-argument signature; absent means the default profile, which needs nothing. */
   env?: Record<string, string>,
 ) => Promise<ProviderCommandResult>;
+
+/**
+ * The explicit environment lock delegates model and credential configuration
+ * to each native coding agent. In that mode Cezar must not second-guess the
+ * agent's own credentials through the provider checks introduced by #652.
+ *
+ * Config-file model locks intentionally do not disable the checks: this bypass
+ * is an operator-level process policy and only the exact documented `1` opts in.
+ */
+export function providerAuthChecksDisabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env[AGENT_MODELS_LOCKED_ENV] === '1';
+}
 
 interface ProviderDescriptor {
   id: ProviderId;
@@ -348,7 +363,7 @@ export class ProviderAuthService {
    * answer that is true NOW.
    */
   status(options?: { refresh?: boolean }): Promise<ProviderStatusResponse> {
-    if (process.env.CEZ_DRY_RUN === '1') {
+    if (process.env.CEZ_DRY_RUN === '1' || providerAuthChecksDisabled()) {
       return Promise.resolve({
         providers: PROVIDER_IDS.map((provider) => ({ provider, status: 'connected' })),
       });
@@ -372,7 +387,7 @@ export class ProviderAuthService {
   }
 
   reportRuntimeAuthFailure(provider: ProviderId): RuntimeAuthFailureReport | null {
-    if (process.env.CEZ_DRY_RUN === '1') return null;
+    if (process.env.CEZ_DRY_RUN === '1' || providerAuthChecksDisabled()) return null;
     const current = this.runtimeFailures.get(provider);
     const failure: RuntimeAuthFailure = {
       generation: ++this.nextRuntimeFailureGeneration,

@@ -444,6 +444,18 @@ async function gitHasIdentity(dir: string): Promise<boolean> {
  * "What did this task change": diff of the worktree (committed + uncommitted
  * + untracked, via `add -N`) against the merge-base with its base branch —
  * so the diff stays *this task's* changes even after the base moves on.
+ *
+ * Deliberately does NOT take the repointed-HEAD guard that `collectChanges`
+ * (#591) and `worktreeShortstat` (#751) resolve through
+ * `resolveTaskDiffBase` — this is the whole-branch anchor on purpose, for two
+ * reasons. Its text output is `GET /api/v1/runs/:id/diff`, a protected surface
+ * (BACKWARD_COMPATIBILITY.md §2), so narrowing it would silently change what
+ * every existing consumer reads. And its other caller, `settleSuccess`, asks
+ * only "is there anything here to review at all" — over-answering that parks a
+ * run at the review gate, which is recoverable, while under-answering would
+ * settle a run to `done` with work still in the tree. If a future change wants
+ * the narrow answer here, take it from `resolveTaskDiffBase` rather than
+ * re-deriving the rule a fourth time.
  */
 export async function worktreeDiff(
   worktreePath: string,
@@ -462,7 +474,12 @@ export async function worktreeDiff(
 
 /**
  * `git diff --stat` version of `worktreeDiff` (spec 010 — the variant
- * comparison columns). Same merge-base anchoring; returns '' on any failure.
+ * comparison columns). Same merge-base anchoring, and it stays whole-branch
+ * for a reason of its own: variants are sibling cezar worktrees, each on its
+ * own `cez/*` branch, and the column exists to compare their *committed* work
+ * against one another. Narrowing one variant to its uncommitted tree would
+ * make the comparison meaningless rather than more honest. Returns '' on any
+ * failure. (The task-diff rule the other surfaces follow: `git-diff-base.ts`.)
  */
 export async function worktreeDiffStat(
   worktreePath: string,

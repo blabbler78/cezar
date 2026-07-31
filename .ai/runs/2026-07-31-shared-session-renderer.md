@@ -63,6 +63,7 @@ Replace the sub-agent pane's reduced transcript path with the same backend-neutr
 - [x] 1.3 Centralize exhaustive rendering and add the nested callback seam — 7aeacec7
 - [x] 1.4 Extract the shared viewport and view-scoped scrolling — 7aeacec7
 - [x] 1.5 Migrate the main thread to SessionTranscript — 7aeacec7
+- [x] Post-review fix: decouple the renderer from run state, remove the legacy row-builder seam, and stabilize its injected ask renderer — 8c035689, 5eeaa678
 
 ### Phase 2: Reuse the renderer in the agent pane
 

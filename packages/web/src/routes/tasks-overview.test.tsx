@@ -193,7 +193,7 @@ describe('TasksOverview — the table', () => {
     expect(diff?.textContent).toBe('+1 −0')
     expect(diff?.getAttribute('data-repointed')).toBe('true')
     expect(diff?.getAttribute('title')).toBe(
-      "+1 −0 across 1 file — uncommitted changes only: this task's worktree has another branch checked out"
+      "+1 −0 across 1 file — uncommitted changes only, measured with another branch checked out in this task's worktree"
     )
   })
 

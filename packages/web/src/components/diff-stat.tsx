@@ -22,11 +22,18 @@ import { cn } from '@/lib/utils'
  * is unreliable for screen readers and unreachable on touch, and here it carries meaning
  * (*what these numbers measure*) rather than a restatement of the visible text. Without it,
  * assistive tech would read the narrowed number as if it were an ordinary one.
+ *
+ * The wording is deliberately past-tense ("measured with…") rather than a claim about the
+ * worktree right now. `diffStat` is a snapshot taken at turn-end and is never recomputed or
+ * cleared afterwards — not when the run finishes, and not when retention reclaims the
+ * worktree — so a present-tense sentence would keep asserting a checkout that may have
+ * stopped existing hours ago. What the flag can honestly say is what was true when the
+ * numbers were taken.
  */
 export function DiffStatLabel({ stat, className }: { stat: DiffStat; className?: string }) {
   const counts = `+${stat.adds} −${stat.dels} across ${stat.files} ${stat.files === 1 ? 'file' : 'files'}`
   const caveat = stat.repointed
-    ? `${counts} — uncommitted changes only: this task's worktree has another branch checked out`
+    ? `${counts} — uncommitted changes only, measured with another branch checked out in this task's worktree`
     : undefined
   return (
     <span

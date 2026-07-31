@@ -45,7 +45,7 @@ describe('DiffStatLabel', () => {
     const el = renderStat({ adds: 1, dels: 0, files: 1, repointed: true })
     expect(el.getAttribute('data-repointed')).toBe('true')
     expect(el.title).toBe(
-      "+1 −0 across 1 file — uncommitted changes only: this task's worktree has another branch checked out"
+      "+1 −0 across 1 file — uncommitted changes only, measured with another branch checked out in this task's worktree"
     )
     // Discoverable without a hover-only affordance being the only signal.
     expect(el.className).toContain('cursor-help')
@@ -53,6 +53,19 @@ describe('DiffStatLabel', () => {
     // `title` is unreliable for screen readers and unreachable on touch, and here it
     // carries meaning rather than a restatement — so the caveat is in the a11y name too.
     expect(el.getAttribute('aria-label')).toBe(el.title)
+  })
+
+  /**
+   * `diffStat` is a turn-end snapshot that is never recomputed or cleared afterwards —
+   * not when the run finishes, and not when retention reclaims the worktree. So the
+   * caveat may outlive the checkout that caused it, and must describe what was true when
+   * the numbers were measured rather than assert a live worktree state.
+   */
+  it('scopes the caveat to when the numbers were measured, not to the worktree now', () => {
+    const title = renderStat({ adds: 1, dels: 0, files: 1, repointed: true }).title
+    expect(title).toContain('measured with another branch checked out')
+    // No present-tense claim about a worktree that may already have been reclaimed.
+    expect(title).not.toContain('has another branch checked out')
   })
 
   it('still renders the real numbers when they are all zero and repointed', () => {

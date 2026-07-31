@@ -110,3 +110,4 @@ never got the same guard, so today the two surfaces disagree for precisely these
 ### Phase 3: Close the loop on the third surface
 
 - [x] 3.1 Document the `worktreeDiff` anchor decision and the schema addition — 3f042977
+- [x] Post-review fix: name the repointed caveat for assistive tech (`aria-label`) and simplify the `collectChanges` call site — ff1f3541

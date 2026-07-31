@@ -98,9 +98,9 @@ never got the same guard, so today the two surfaces disagree for precisely these
 
 ### Phase 1: One shared anchor rule, and the guard on `worktreeShortstat`
 
-- [ ] 1.1 Add the shared `resolveTaskDiffBase` helper with unit tests
-- [ ] 1.2 Rewrite `collectChanges` to use the shared helper
-- [ ] 1.3 Guard `worktreeShortstat` and thread `run.branch` from `recordTurnEnd`
+- [x] 1.1 Add the shared `resolveTaskDiffBase` helper with unit tests — 2115804e
+- [x] 1.2 Rewrite `collectChanges` to use the shared helper — b1097da0
+- [x] 1.3 Guard `worktreeShortstat` and thread `run.branch` from `recordTurnEnd` — 2669c3fd
 
 ### Phase 2: Make the narrowed number honest in the UI
 

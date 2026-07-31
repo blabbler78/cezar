@@ -1,9 +1,9 @@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
-import type { ApiRun } from '@open-mercato/cezar-api-client'
+import type { ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 
 import type { SubagentSummary } from './subagent-dock'
-import type { ThreadEntry } from './thread-state'
+import type { ThreadAsk, ThreadEntry } from './thread-state'
 import { SessionTranscript, agentTranscriptSections } from './session-transcript'
 
 /**
@@ -18,13 +18,13 @@ import { SessionTranscript, agentTranscriptSections } from './session-transcript
  */
 export function SubagentSheet({
   runId,
-  run,
+  renderAsk,
   agent,
   entries,
   onClose,
 }: {
   runId: string
-  run?: ApiRun
+  renderAsk?: (ask: ThreadAsk) => ReactNode
   /** The selected agent, or `undefined` when the sheet is closed. */
   agent: SubagentSummary | undefined
   /** That agent's child entries, in stream order (`subagentChildren`). */
@@ -41,7 +41,7 @@ export function SubagentSheet({
         className="flex min-h-0 w-full gap-0 p-0 sm:max-w-xl"
       >
         {agent !== undefined ? (
-          <SheetBody runId={runId} run={run} agent={agent} entries={entries} />
+          <SheetBody runId={runId} renderAsk={renderAsk} agent={agent} entries={entries} />
         ) : null}
       </SheetContent>
     </Sheet>
@@ -50,12 +50,12 @@ export function SubagentSheet({
 
 function SheetBody({
   runId,
-  run,
+  renderAsk,
   agent,
   entries,
 }: {
   runId: string
-  run?: ApiRun
+  renderAsk?: (ask: ThreadAsk) => ReactNode
   agent: SubagentSummary
   entries: ThreadEntry[]
 }) {
@@ -85,7 +85,7 @@ function SheetBody({
         viewId={`agent:${agent.id}`}
         sections={agentTranscriptSections(agent.id, entries)}
         mode="panel"
-        run={run}
+        renderAsk={renderAsk}
         empty={
           <div data-slot="subagent-empty" className="py-2 text-[13px] text-muted-foreground">
             No attributed output — see the thread card for this agent&apos;s result.

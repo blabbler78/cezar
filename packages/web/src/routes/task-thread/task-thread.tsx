@@ -24,9 +24,7 @@ import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
 import { taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
 
-import {
-  WorkingIndicator,
-} from './thread-items'
+import { WorkingIndicator } from './thread-items'
 import { useContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
@@ -35,6 +33,7 @@ import { SubagentSheet } from './subagent-sheet'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
+import { AskCard } from './ask-card'
 import { useRunRecordReconcile } from './run-reconcile'
 import { useActiveProviderAvailability } from './active-provider'
 import { ThreadLoading } from './thread-loading'
@@ -45,7 +44,6 @@ import {
   buildTranscriptRows,
   mainTranscriptSections,
   type TranscriptMessageActions,
-  type TranscriptRowModel,
 } from './session-transcript'
 import {
   latestPlanEntries,
@@ -109,21 +107,6 @@ export function TaskThreadRoute() {
  * (thread-scroll.ts owns the rule). Row keys are turn-scoped — the same keys the open-card
  * cache uses, because v2 item ids repeat across sessions.
  */
-export function buildThreadRows(
-  run: ApiRun,
-  thread: ThreadState,
-  /** Queued-run affordances (#472). Omitted (the default) renders every bubble read-only,
-   *  which is what every caller outside the live thread view wants. */
-  edit?: {
-    onEditTask: (text: string) => Promise<void>
-    onEditMessage: (msgId: string, text: string) => Promise<void>
-    onRemoveMessage: (msgId: string) => Promise<void>
-  },
-): TranscriptRowModel[] {
-  void edit
-  return buildTranscriptRows(mainTranscriptSections(run, thread), run.id)
-}
-
 /** The loaded thread. The header owns its own data hooks (mutations, the runs list); the
  *  thread body stays presentational — tests drive it with reduced fixture states directly. */
 export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }) {
@@ -251,7 +234,7 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
           viewId="main"
           sections={sections}
           mode="document"
-          run={run}
+          renderAsk={(ask) => <AskCard ask={ask} run={run} />}
           messageActions={messageActions}
           scrollControls={scroll}
           renderMode={mode}
@@ -327,7 +310,7 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
           uses), or tool cards expanded in the sheet would forget that on reopen. */}
       <SubagentSheet
         runId={run.id}
-        run={run}
+        renderAsk={(ask) => <AskCard ask={ask} run={run} />}
         agent={openAgent}
         entries={openAgentChildren}
         onClose={() => setOpenAgentId(undefined)}

@@ -2,7 +2,6 @@ import { useMemo, type ReactNode } from 'react'
 
 import type { ApiRun } from '@open-mercato/cezar-api-client'
 
-import { AskCard } from './ask-card'
 import { groupThreadItems, type ThreadBlock } from './thread-groups'
 import {
   AssistantMessage,
@@ -24,7 +23,7 @@ import {
   type ThreadRow,
   type ThreadScrollControls,
 } from './thread-scroller'
-import type { ThreadEntry, ThreadState } from './thread-state'
+import type { ThreadAsk, ThreadEntry, ThreadState } from './thread-state'
 
 export interface TranscriptUserMessage {
   text: string
@@ -61,8 +60,8 @@ export interface SessionTranscriptProps {
   sections: readonly TranscriptSection[]
   mode: 'document' | 'panel'
   empty?: ReactNode
-  /** Needed only by interactive Ask cards; the renderer remains backend-neutral. */
-  run?: ApiRun
+  /** Injects the run-aware reply behavior without coupling this view to run data or stores. */
+  renderAsk?: (ask: ThreadAsk) => ReactNode
   messageActions?: Readonly<Record<string, TranscriptMessageActions>>
   /** Main-document integration preserves the shell's existing dock-owned jump pill. */
   scrollControls?: ThreadScrollControls
@@ -146,7 +145,7 @@ export function SessionTranscript({
   sections,
   mode,
   empty,
-  run,
+  renderAsk,
   messageActions,
   scrollControls,
   renderMode,
@@ -165,10 +164,10 @@ export function SessionTranscript({
               actions={messageActions?.[row.key]}
             />
           ) : (
-            <ThreadBlockRenderer block={row.content.block} scope={row.scope} run={run} />
+            <ThreadBlockRenderer block={row.content.block} scope={row.scope} renderAsk={renderAsk} />
           ),
       })),
-    [messageActions, rowModels, run],
+    [messageActions, renderAsk, rowModels],
   )
   const rowMode = renderMode ?? threadRenderMode('', rows.length)
 
@@ -228,15 +227,15 @@ function TranscriptUserBubble({
 function ThreadBlockRenderer({
   block,
   scope,
-  run,
+  renderAsk,
 }: {
   block: ThreadBlock
   scope: string
-  run?: ApiRun
+  renderAsk?: (ask: ThreadAsk) => ReactNode
 }): ReactNode {
   switch (block.kind) {
     case 'entry':
-      return <ThreadEntryRenderer entry={block.entry} scope={scope} run={run} />
+      return <ThreadEntryRenderer entry={block.entry} scope={scope} renderAsk={renderAsk} />
     case 'tool-card':
       return (
         <ToolCard
@@ -244,7 +243,7 @@ function ThreadBlockRenderer({
           nested={block.children}
           cacheKey={`${scope}:${block.id}`}
           renderNested={(entries, nestedScope) => (
-            <GroupedEntries entries={entries} scope={nestedScope} run={run} />
+            <GroupedEntries entries={entries} scope={nestedScope} renderAsk={renderAsk} />
           )}
         />
       )
@@ -254,7 +253,7 @@ function ThreadBlockRenderer({
       return (
         <ToolStreak count={block.count}>
           {block.blocks.map((inner) => (
-            <ThreadBlockRenderer key={inner.id} block={inner} scope={scope} run={run} />
+            <ThreadBlockRenderer key={inner.id} block={inner} scope={scope} renderAsk={renderAsk} />
           ))}
         </ToolStreak>
       )
@@ -266,25 +265,25 @@ function ThreadBlockRenderer({
 function GroupedEntries({
   entries,
   scope,
-  run,
+  renderAsk,
 }: {
   entries: readonly ThreadEntry[]
   scope: string
-  run?: ApiRun
+  renderAsk?: (ask: ThreadAsk) => ReactNode
 }) {
   return groupThreadItems([...entries]).map((block) => (
-    <ThreadBlockRenderer key={block.id} block={block} scope={scope} run={run} />
+    <ThreadBlockRenderer key={block.id} block={block} scope={scope} renderAsk={renderAsk} />
   ))
 }
 
 function ThreadEntryRenderer({
   entry,
   scope,
-  run,
+  renderAsk,
 }: {
   entry: ThreadEntry
   scope: string
-  run?: ApiRun
+  renderAsk?: (ask: ThreadAsk) => ReactNode
 }): ReactNode {
   switch (entry.kind) {
     case 'message':
@@ -302,8 +301,8 @@ function ThreadEntryRenderer({
     case 'image':
       return <ImageItem image={entry} />
     case 'ask':
-      return run !== undefined ? (
-        <AskCard ask={entry} run={run} />
+      return renderAsk !== undefined ? (
+        renderAsk(entry)
       ) : (
         <div data-slot="ask-card" className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
           The agent asked a question. Open the main session to answer it.

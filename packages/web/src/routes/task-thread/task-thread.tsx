@@ -1,5 +1,5 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useLocation, useParams } from 'react-router'
 
 import { Link } from '@/lib/project-router'
@@ -50,6 +50,7 @@ import {
   reduceThread,
   threadFilePaths,
   threadFooter,
+  type ThreadAsk,
   type ThreadState,
 } from './thread-state'
 
@@ -102,11 +103,6 @@ export function TaskThreadRoute() {
   return <ThreadView run={run.data} thread={thread} />
 }
 
-/**
- * The run's task + every turn, flattened to keyed rows for the threshold-switched scroller
- * (thread-scroll.ts owns the rule). Row keys are turn-scoped — the same keys the open-card
- * cache uses, because v2 item ids repeat across sessions.
- */
 /** The loaded thread. The header owns its own data hooks (mutations, the runs list); the
  *  thread body stays presentational — tests drive it with reduced fixture states directly. */
 export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }) {
@@ -199,6 +195,7 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
 
   const sections = useMemo(() => mainTranscriptSections(run, thread), [run, thread])
   const rows = useMemo(() => buildTranscriptRows(sections, run.id), [sections, run.id])
+  const renderAsk = useCallback((ask: ThreadAsk) => <AskCard ask={ask} run={run} />, [run])
   const messageActions = useMemo<Readonly<Record<string, TranscriptMessageActions>> | undefined>(() => {
     if (edit === undefined) return undefined
     const actions: Record<string, TranscriptMessageActions> = {
@@ -234,7 +231,7 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
           viewId="main"
           sections={sections}
           mode="document"
-          renderAsk={(ask) => <AskCard ask={ask} run={run} />}
+          renderAsk={renderAsk}
           messageActions={messageActions}
           scrollControls={scroll}
           renderMode={mode}
@@ -305,12 +302,11 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
       <AcceptCelebration status={run.status} />
 
       {/* The drill-down for whichever Agents-dock row was clicked. Rendered outside the dock
-          so the sheet's portal is not affected by the dock's collapse state — but inside its
-          own card cache (module-level and run-keyed, so this is the SAME store the thread
-          uses), or tool cards expanded in the sheet would forget that on reopen. */}
+          so the sheet's portal is not affected by the dock's collapse state. SessionTranscript
+          owns the shared run-keyed card cache, so expanded sheet cards survive a reopen. */}
       <SubagentSheet
         runId={run.id}
-        renderAsk={(ask) => <AskCard ask={ask} run={run} />}
+        renderAsk={renderAsk}
         agent={openAgent}
         entries={openAgentChildren}
         onClose={() => setOpenAgentId(undefined)}

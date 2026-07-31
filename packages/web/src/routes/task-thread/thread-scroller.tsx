@@ -124,7 +124,7 @@ export function useThreadScroll(
     if (!scroller || !content) return
 
     // Arrival: cached position if the reader had one away from the tail, else the tail.
-    // Once per run — a container swap (threshold crossing) re-subscribes without re-arriving.
+    // Once per view — a container swap (threshold crossing) re-subscribes without re-arriving.
     if (arrivedForRef.current !== viewKey) {
       arrivedForRef.current = viewKey
       const memory = readThreadScroll(viewKey)

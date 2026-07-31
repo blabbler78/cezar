@@ -113,3 +113,4 @@ PR: #759
 
 - [x] 3.1 Document the `worktreeDiff` anchor decision and the schema addition — 3f042977
 - [x] Post-review fix: name the repointed caveat for assistive tech (`aria-label`) and simplify the `collectChanges` call site — ff1f3541
+- [x] Post-re-review fix: scope the repointed caveat to when it was measured, so it cannot outlive a reclaimed worktree — 7cca95c1

@@ -109,4 +109,4 @@ never got the same guard, so today the two surfaces disagree for precisely these
 
 ### Phase 3: Close the loop on the third surface
 
-- [ ] 3.1 Document the `worktreeDiff` anchor decision and the schema addition
+- [x] 3.1 Document the `worktreeDiff` anchor decision and the schema addition — 3f042977

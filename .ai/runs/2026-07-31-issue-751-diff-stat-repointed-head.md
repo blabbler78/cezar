@@ -104,8 +104,8 @@ never got the same guard, so today the two surfaces disagree for precisely these
 
 ### Phase 2: Make the narrowed number honest in the UI
 
-- [ ] 2.1 Persist the optional `repointed` flag on `diffStat`
-- [ ] 2.2 Annotate `DiffStatLabel` and cover the consuming surfaces
+- [x] 2.1 Persist the optional `repointed` flag on `diffStat` — 20a78ad4
+- [x] 2.2 Annotate `DiffStatLabel` and cover the consuming surfaces — 9c648c52
 
 ### Phase 3: Close the loop on the third surface
 

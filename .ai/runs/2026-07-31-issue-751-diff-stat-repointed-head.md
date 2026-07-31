@@ -94,6 +94,8 @@ never got the same guard, so today the two surfaces disagree for precisely these
 
 ## Progress
 
+PR: #759
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: One shared anchor rule, and the guard on `worktreeShortstat`

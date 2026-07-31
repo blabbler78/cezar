@@ -12,14 +12,14 @@ branch the agent checked out into the worktree.
 
 ## Background
 
-`worktreeShortstat` (`src/git-worktree.ts`) anchors its `git diff --shortstat` at
+`worktreeShortstat` (`packages/cezar/src/git-worktree.ts`) anchors its `git diff --shortstat` at
 `merge-base(baseBranch, HEAD)` without ever asking whether HEAD is still on the task's own
 branch. Every review, QA, or "continue someone else's branch" run repoints HEAD, so the stored
 number becomes the reviewed branch's full diff against `main` — five-figure numbers on tasks that
 changed nothing.
 
 The Changes tab already solved exactly this in #591: `collectChanges`
-(`src/server/git-changes.ts`) takes `opts.taskBranch`, compares it against
+(`packages/cezar/src/server/git-changes.ts`) takes `opts.taskBranch`, compares it against
 `git rev-parse --abbrev-ref HEAD`, and anchors at `HEAD` (uncommitted work only) when the two
 differ, returning `repointedHead` so the UI can explain the narrowed number. `worktreeShortstat`
 never got the same guard, so today the two surfaces disagree for precisely these runs.
@@ -50,9 +50,9 @@ never got the same guard, so today the two surfaces disagree for precisely these
 
 ### Phase 1: One shared anchor rule, and the guard on `worktreeShortstat`
 
-- **1.1** Add `src/git-diff-base.ts`: `resolveTaskDiffBase(runGit, baseBranch, { taskBranch })`
-  returning `{ base, repointedHead? }`, taking an injected git runner so both `src/git-worktree.ts`
-  and `src/server/git-changes.ts` (which each own a private `git()`) can use it without either
+- **1.1** Add `packages/cezar/src/git-diff-base.ts`: `resolveTaskDiffBase(runGit, baseBranch, { taskBranch })`
+  returning `{ base, repointedHead? }`, taking an injected git runner so both `packages/cezar/src/git-worktree.ts`
+  and `packages/cezar/src/server/git-changes.ts` (which each own a private `git()`) can use it without either
   importing the other. Unit tests for the on-branch, repointed, detached, no-`taskBranch`, and
   merge-base-failure cases.
 - **1.2** Rewrite `collectChanges` to call the helper, proving the extraction is behavior-preserving
@@ -60,16 +60,16 @@ never got the same guard, so today the two surfaces disagree for precisely these
 - **1.3** Give `worktreeShortstat` an `opts: { taskBranch?: string }` parameter routed through the
   same helper; keep the existing contract (never throws, `null` on git failure, all-zeros for an
   empty diff). Thread `run.branch` at the single call site in `RunManager.recordTurnEnd`
-  (`src/workflows/run.ts`). Tests in `src/git-worktree.test.ts` (repointed, on-branch, and
-  no-`taskBranch` cases) and `src/workflows/run.test.ts` (the stat stored for a repointed run).
+  (`packages/cezar/src/workflows/run.ts`). Tests in `packages/cezar/src/git-worktree.test.ts` (repointed, on-branch, and
+  no-`taskBranch` cases) and `packages/cezar/src/workflows/run.test.ts` (the stat stored for a repointed run).
 
 ### Phase 2: Make the narrowed number honest in the UI
 
 - **2.1** Add optional `repointed?: boolean` to the persisted `diffStat` shape
-  (`src/runs/store.ts` zod schema) and to `web/app/src/api/types.ts`; `worktreeShortstat` sets it
+  (`packages/cezar/src/runs/store.ts` zod schema) and to `packages/contract/src/runs.ts`; `worktreeShortstat` sets it
   only when the head is repointed, so the key is absent on every normal run and every pre-existing
   record still parses.
-- **2.2** Surface it in `DiffStatLabel` (`web/app/src/components/diff-stat.tsx`): a `title` tooltip
+- **2.2** Surface it in `DiffStatLabel` (`packages/web/src/components/diff-stat.tsx`): a `title` tooltip
   that says the number covers uncommitted changes only because HEAD is on another branch, a
   `data-repointed` attribute for the surfaces to key on, and a dotted underline + `cursor-help`
   so the annotation is discoverable. Component tests, plus coverage through the sidebar quick list
@@ -90,7 +90,7 @@ never got the same guard, so today the two surfaces disagree for precisely these
   the fix, but it is also a surprise, which is what the tooltip and the `data-repointed` marker
   exist to explain.
 - **Refactor regression in `collectChanges`.** The extraction is covered by the existing #591 tests
-  in `src/server/git-changes.test.ts`, which must stay green untouched.
+  in `packages/cezar/src/server/git-changes.test.ts`, which must stay green untouched.
 
 ## Progress
 

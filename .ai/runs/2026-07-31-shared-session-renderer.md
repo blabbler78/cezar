@@ -57,20 +57,20 @@ Replace the sub-agent pane's reduced transcript path with the same backend-neutr
 
 ### Phase 1: Extract and stabilize the shared renderer
 
-- [ ] 1.1 Add regression coverage for current main transcript behavior
-- [ ] 1.2 Add transcript view models, adapters, and pure row building
-- [ ] 1.3 Centralize exhaustive rendering and add the nested callback seam
-- [ ] 1.4 Extract the shared viewport and view-scoped scrolling
-- [ ] 1.5 Migrate the main thread to SessionTranscript
+- [x] 1.1 Add regression coverage for current main transcript behavior — 7aeacec7
+- [x] 1.2 Add transcript view models, adapters, and pure row building — 7aeacec7
+- [x] 1.3 Centralize exhaustive rendering and add the nested callback seam — 7aeacec7
+- [x] 1.4 Extract the shared viewport and view-scoped scrolling — 7aeacec7
+- [x] 1.5 Migrate the main thread to SessionTranscript — 7aeacec7
 
 ### Phase 2: Reuse the renderer in the agent pane
 
-- [ ] 2.1 Migrate SubagentSheet to SessionTranscript panel mode
-- [ ] 2.2 Remove duplicate agent scrolling and fix the bounded panel viewport
-- [ ] 2.3 Remove NestedEntry and prove canonical nested rendering
+- [x] 2.1 Migrate SubagentSheet to SessionTranscript panel mode — 7aeacec7
+- [x] 2.2 Remove duplicate agent scrolling and fix the bounded panel viewport — 7aeacec7
+- [x] 2.3 Remove NestedEntry and prove canonical nested rendering — 7aeacec7
 
 ### Phase 3: Backend and scale verification
 
-- [ ] 3.1 Add backend-neutral reducer-to-component coverage
+- [x] 3.1 Add backend-neutral reducer-to-component coverage — 7aeacec7
 - [ ] 3.2 Add long transcript and image regression coverage
 - [ ] 3.3 Complete full validation and verification preparation

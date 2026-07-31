@@ -135,4 +135,21 @@ describe('claudeStateFilePath', () => {
     const env = { HOME: '/home/u' } as NodeJS.ProcessEnv;
     expect(claudeStateFilePath('/home/u/.claude-klaudiusz', env)).toBe('/home/u/.claude-klaudiusz/.claude.json');
   });
+
+  it('reads an account\'s OWN state file when the cezar process carries an override', () => {
+    // Review case: cezar started with CLAUDE_CONFIG_DIR=/opt/work, and `~/.claude` added as a NAMED
+    // account (legal — the discovered account is /opt/work, so it is not a duplicate). The answer is
+    // the file INSIDE it, because that is the one the CLI will read when cezar runs that account as
+    // `CLAUDE_CONFIG_DIR=~/.claude claude`. The sibling would describe a login it never uses.
+    const env = { HOME: '/home/u', CLAUDE_CONFIG_DIR: '/opt/work' } as NodeJS.ProcessEnv;
+    expect(claudeStateFilePath('/home/u/.claude', env)).toBe('/home/u/.claude/.claude.json');
+    expect(claudeStateFilePath('/opt/work', env)).toBe('/opt/work/.claude.json');
+  });
+
+  it('keeps the SIBLING spelling for the discovered account on a plain machine', () => {
+    // The zero-config path, and the one case where the file is not inside: no override anywhere, so
+    // the CLI never sees the variable.
+    const env = { HOME: '/home/u' } as NodeJS.ProcessEnv;
+    expect(claudeStateFilePath('/home/u/.claude', env)).toBe('/home/u/.claude.json');
+  });
 });

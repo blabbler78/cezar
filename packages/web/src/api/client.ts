@@ -802,8 +802,24 @@ export async function getGroup(groupId: string, opts?: ReadOptions): Promise<Gro
 
 // ---- workspace mutations ------------------------------------------------------------------
 
-export async function connectProvider(provider: ProviderId): Promise<ProviderConnectResponse> {
-  return unwrap(await cez.api.v1.providers.connect.$post({ json: { provider } }), '/providers/connect')
+/**
+ * Open a terminal signed in to `provider`, optionally for a NAMED account.
+ *
+ * `profileId` aims the login at one agent account (spec 2026-07-29-agent-profiles): the server
+ * renders `CLAUDE_CONFIG_DIR=… claude /login` for it and fails closed rather than running the bare
+ * command, because a terminal silently pointed at the wrong account is invisible to the user.
+ * Omitted means the discovered account, which is how the Providers card has always called this.
+ */
+export async function connectProvider(
+  provider: ProviderId,
+  profileId?: string,
+): Promise<ProviderConnectResponse> {
+  return unwrap(
+    await cez.api.v1.providers.connect.$post({
+      json: { provider, ...(profileId ? { profileId } : {}) },
+    }),
+    '/providers/connect',
+  )
 }
 
 export async function setProviderEnabled(

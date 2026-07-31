@@ -800,4 +800,77 @@ describe('agent profiles API', () => {
       expect(listed.selections[project.root]).toEqual({ claude: other.profile.id });
     });
   });
+
+  /**
+   * `POST /api/v1/providers/connect` aimed at a NAMED account — the last mile of "add → Connect →
+   * the CLI creates the folder", and the branch the cockpit now calls.
+   */
+  describe('connect, aimed at one account', () => {
+    it('re-probes rather than answering "already connected" from a warm cache', async () => {
+      // The trap: `profileStatus` serves the per-account cache, and a CONNECTED answer stands for
+      // ten minutes. Without an eviction, Connect after a `claude /logout` opens nothing and says
+      // "already connected" — and contradicts this module's own claim that opening a login is an
+      // explicit invalidation point rather than something that waits out a window.
+      delete process.env.CEZ_DRY_RUN;
+      let loggedIn = true;
+      let spawns = 0;
+      const providerAuth = new ProviderAuthService({
+        platform: 'linux',
+        runCommand: async (executable) => {
+          spawns += 1;
+          if (executable !== 'claude') return { stdout: 'unrecognized', stderr: '', exitCode: 0 };
+          return loggedIn
+            ? { stdout: '{"loggedIn":true}', stderr: '', exitCode: 0 }
+            : { stdout: '{"loggedIn":false}', stderr: '', exitCode: 1 };
+        },
+      });
+      const app = makeApp({ providerAuth, openTerminal: async () => true });
+      const { body: created } = await send('POST', '/api/v1/workspace/agent-profiles', {
+        provider: 'claude',
+        configDir: claudeDir('claude-klaudiusz'),
+      });
+      // Warm the account's cache with the connected answer…
+      await providerAuth.profileStatus('claude', {
+        id: created.profile.id,
+        configDir: claudeDir('claude-klaudiusz'),
+      });
+      const warmed = spawns;
+      loggedIn = false; // …then log out behind cezar's back, as a terminal would.
+
+      const res = await apiRequest(app, '/api/v1/providers/connect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'claude', profileId: created.profile.id }),
+      });
+      expect(res.status).toBe(200);
+      // Opened a terminal for the logout it actually found — not "already connected".
+      expect(await res.json()).toMatchObject({ opened: true });
+      expect(spawns).toBeGreaterThan(warmed);
+    });
+
+    it('refuses a named account in hosted mode BEFORE resolving it', async () => {
+      // Every sibling route gates first. Resolving first would read the store, build a command
+      // carrying the account's absolute path — which both the success body and the hosted 409 echo —
+      // and answer `unknown account: <id>` for a wrong id, an enumeration oracle for ids the hosted
+      // listing deliberately withholds.
+      const { body: created } = await send('POST', '/api/v1/workspace/agent-profiles', {
+        provider: 'claude',
+        configDir: claudeDir('claude-klaudiusz'),
+      });
+      process.env.CEZ_REMOTE = '1';
+      for (const profileId of [created.profile.id, 'no-such-account']) {
+        const res = await apiRequest(makeApp(), '/api/v1/providers/connect', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ provider: 'claude', profileId }),
+        });
+        expect(res.status).toBe(409);
+        const answer = (await res.json()) as { error: string; command?: string };
+        // No host path, and the same words whether or not the id exists.
+        expect(answer.command).toBeUndefined();
+        expect(answer.error).toContain('managed from the machine that owns the checkout');
+        expect(JSON.stringify(answer)).not.toContain(home);
+      }
+    });
+  });
 });

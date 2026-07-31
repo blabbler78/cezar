@@ -83,6 +83,9 @@ A stabilization release that hardens single-project mode and sharpens the cockpi
   `/api/v1/health` already follows). A *disconnected* answer is still re-checked within seconds,
   because that one blocks starting a run — so logging in from a terminal is not punished with a
   ten-minute wait. Same machine, same accounts: 2.5s → 12ms.
+- **An added agent account can now be signed in from cezar.** The account row grows Connect and
+  Check again; Connect opens a terminal aimed at that account's config dir rather than the default
+  one. Previously the pane pointed at a Connect button that did not exist.
 - **A task now says which agent, account and model produced it**, as text in the header
   (`claude · Klaudiusz · opus`) rather than hidden behind an icon; the account is the one the step actually spawned under, so a resumed
   task reports the login that owns its session rather than whatever the project is set to now.

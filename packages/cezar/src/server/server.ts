@@ -1768,6 +1768,18 @@ export function createApp(deps: ServerDeps) {
       const body = { data: c.req.valid('json') };
 
       const provider = body.data.provider as ProviderId;
+      // A NAMED account is refused in hosted mode before anything is resolved, exactly like every
+      // sibling route in the agent-profiles family. Checking later would already have read
+      // `~/.cezar/agent-accounts.json`, built a command carrying the account's absolute path (which
+      // both the success body and the hosted 409 echo), and — for a stored account — spawned a
+      // probe. It would also answer `unknown account: <id>` for a wrong id, which is an enumeration
+      // oracle for the very ids the hosted listing withholds. The bare-provider spelling keeps its
+      // existing behaviour: it names no host path and is how the Providers card has always worked.
+      if (body.data.profileId !== undefined
+        && body.data.profileId !== DEFAULT_AGENT_ACCOUNT_ID
+        && !capabilities().localHandoff) {
+        return c.json(hostedProfileRefusal, 409);
+      }
       // Resolve the account BEFORE anything else: both the command and the status probe below
       // must describe the same one, or the pane reports on the personal login while the terminal
       // signs into the work login.
@@ -1781,6 +1793,13 @@ export function createApp(deps: ServerDeps) {
       if (command === null) {
         return c.json({ error: `This account's folder cannot be used in a terminal command: ${profile.configDir}` }, 409);
       }
+      // BOTH branches must mean "is this account signed in NOW". The default branch refreshes; the
+      // account branch has to evict first, because `profileStatus` serves the per-account cache and
+      // a connected answer there stands for CONNECTED_TTL_MS. Without this, Connect after a
+      // `claude /logout` answers "already connected", opens nothing, and the user is stuck — and it
+      // would contradict this module's own invariant that opening a login is one of the things
+      // cezar CAN observe and therefore invalidates explicitly rather than waiting out a window.
+      if (!profile.isDefault) providerAuth.forgetProfileStatus(provider, profile.id);
       const row = profile.isDefault
         ? (await providerAuth.status({ refresh: true })).providers.find(
           (candidate) => candidate.provider === provider,
@@ -2231,6 +2250,13 @@ export function createApp(deps: ServerDeps) {
             // is stored as ABSENCE — the default id is never written to the file.
             if (profileId === null || profileId === DEFAULT_AGENT_ACCOUNT_ID) delete selection[provider];
             else selection[provider] = profileId;
+            // The machine default keeps an emptied object where a repo selection is deleted, and
+            // that asymmetry is the schema's, not an oversight: `defaults` is one FIXED field with
+            // `.default(() => ({}))`, so `mergeWriteAgentAccounts` re-materializes it on the next
+            // write no matter what this one omits (verified). `selections` is a growing MAP, where
+            // an emptied entry is a row per repo ever touched that says nothing. The rule stated
+            // for `agentDefaults.models` — "absence is the same answer" — applies there because
+            // that key is `.optional()`, so deleting it actually sticks.
             if (root === null) current.defaults = selection;
             else if (Object.keys(selection).length === 0) delete current.selections[root];
             else current.selections[root] = selection;

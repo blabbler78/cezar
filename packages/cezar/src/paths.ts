@@ -145,16 +145,34 @@ export function agentHomePaths(env: NodeJS.ProcessEnv = process.env): AgentHomeP
 }
 
 /**
- * Where Claude Code keeps `.claude.json` — its MCP/state file — for a given
- * config dir. The location is NOT uniform: by default the file is a SIBLING of
- * `~/.claude`, but under a `CLAUDE_CONFIG_DIR` override it moves INSIDE the
- * overridden dir (verified against the shipped CLI 2026-07-29, and against a
- * real second-account dir on disk). Reading it from `dirname(configDir)`
- * unconditionally — as this repo did — lands on `~/.claude.json` for a
- * `~/.claude-klaudiusz` profile, i.e. the wrong account's file.
+ * Where Claude Code keeps `.claude.json` — its MCP/state file — for a given config dir. The
+ * location is NOT uniform: by default the file is a SIBLING of `~/.claude`, but under a
+ * `CLAUDE_CONFIG_DIR` override it moves INSIDE the overridden dir (verified against the shipped CLI
+ * 2026-07-29, and against a real second-account dir on disk). Reading it from `dirname(configDir)`
+ * unconditionally — as this repo did — lands on `~/.claude.json` for a `~/.claude-klaudiusz`
+ * profile, i.e. the wrong account's file.
+ *
+ * The condition below reads like two heuristics OR-ed together; it is one exact rule. The file sits
+ * inside precisely when the CLI will SEE `CLAUDE_CONFIG_DIR` for this dir, and cezar knows when
+ * that is:
+ *
+ *   - a stored account is always spawned with it (`profileEnv`), and its dir is by construction not
+ *     `~/.claude` — the route refuses a dir that is already the discovered account's;
+ *   - the DISCOVERED account is spawned with nothing added, so it sees the variable only when the
+ *     cezar process itself carries one — and it does reach the child, because `CLAUDE_` is in
+ *     `BACKEND_ALLOW_PREFIXES`.
+ *
+ * One case is worth naming because it looks like a bug and is not. Start cezar with
+ * `CLAUDE_CONFIG_DIR=/opt/work` and add `~/.claude` as a NAMED account (legal — the discovered
+ * account is `/opt/work`, so `~/.claude` is not a duplicate). This answers `~/.claude/.claude.json`,
+ * not the sibling `~/.claude.json`, and "Show details" can therefore say "not signed in" for a
+ * folder a bare `claude` would treat as signed in. That is correct rather than unfortunate: cezar
+ * will run that account as `CLAUDE_CONFIG_DIR=~/.claude claude`, and under that invocation the
+ * state file the CLI reads and writes IS the one inside. Reporting the sibling would describe a
+ * login this account will never use.
  */
 export function claudeStateFilePath(claudeHome: string, env: NodeJS.ProcessEnv = process.env): string {
-  const overridden = (env.CLAUDE_CONFIG_DIR?.trim() || '') !== ''
+  const seesOverride = (env.CLAUDE_CONFIG_DIR?.trim() || '') !== ''
     || claudeHome !== join(env.HOME || env.USERPROFILE || homedir(), '.claude');
-  return overridden ? join(claudeHome, '.claude.json') : join(dirname(claudeHome), '.claude.json');
+  return seesOverride ? join(claudeHome, '.claude.json') : join(dirname(claudeHome), '.claude.json');
 }

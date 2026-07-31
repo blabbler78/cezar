@@ -2,13 +2,15 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ExternalLinkIcon, IdCardIcon } from 'lucide-react'
 import { Fragment, useState } from 'react'
 
-import { putWorkspaceConfig } from '@/api/client'
+import { ApiError, putWorkspaceConfig } from '@/api/client'
 
 import {
   useAgentAccountDetails,
   useAgentProfiles,
   useHealth,
   useAgentAccountStatus,
+  useConnectAgentAccount,
+  useRecheckAgentAccount,
   useOpenAgentAccountFile,
   useOpenTargets,
   useProviderStatus,
@@ -454,6 +456,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: () => void }) {
   const [showDetails, setShowDetails] = useState(false)
   const routeId = agentAccountRouteId(account)
+  const connect = useConnectAgentAccount()
+  const recheck = useRecheckAgentAccount()
   // The listing carries a status whenever the server has one cached — which, after its boot warm,
   // is the normal case. Only ask for a probe when it does not: an account added mid-session, or a
   // cache that has aged out. Either way the row renders immediately.
@@ -500,9 +504,55 @@ function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: ()
         </div>
 
         {/* The collapsed row is a READING surface — which account, where, is it signed in. Every
-            action that changes or destroys something lives one deliberate click away, inside the
-            panel below. */}
+            action that CHANGES or DESTROYS something lives one deliberate click away, inside the
+            panel below. Connect and Check again are the two exceptions, and deliberately so: they
+            are how an account becomes usable at all, and the row's own "folder not created yet"
+            copy points at Connect. Burying the only sign-in path behind "Show details" is what left
+            an added account with no way to log in. */}
         <div className="flex shrink-0 items-center gap-2">
+          {status?.status !== 'connected' ? (
+            <Button
+              type="button"
+              size="sm"
+              data-action="account-connect"
+              disabled={connect.isPending}
+              onClick={() =>
+                connect.mutate(
+                  { provider: account.provider, ...(account.isDefault ? {} : { profileId: account.id }) },
+                  {
+                    onSuccess: (result) =>
+                      toast(result.opened
+                        ? 'Finish signing in in the terminal, then Check again.'
+                        : 'This account is already connected.'),
+                    // The server answers a copyable command when it cannot open a terminal (hosted
+                    // mode, no emulator, a folder it refuses to embed). Showing it is the whole
+                    // point of failing closed rather than running the bare login.
+                    onError: (error: Error) =>
+                      toast(error instanceof ApiError && error.command
+                        ? `${error.message} — run: ${error.command}`
+                        : error.message, { tone: 'danger' }),
+                  },
+                )
+              }
+            >
+              Connect
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            data-action="account-recheck"
+            disabled={recheck.isPending}
+            title="Re-probe this account's login now, instead of waiting for the cached answer"
+            onClick={() =>
+              recheck.mutate(routeId, {
+                onError: (error: Error) => toast(error.message, { tone: 'danger' }),
+              })
+            }
+          >
+            Check again
+          </Button>
           {/* Identity is opt-in: nothing is requested until this is pressed, so an email is absent
               from the page rather than merely unrendered. */}
           <Button

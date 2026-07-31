@@ -924,7 +924,9 @@ describe('ProviderAuthService', () => {
       expect(client.status).toBe('connected');
       expect(calls).toBe(2);
 
-      // Both answers are cached independently on the same 5s TTL.
+      // Both answers are cached independently, on the same asymmetric lifetime `status()` uses
+      // (`cacheTtlFor`) — not a flat 5s window; that spelling is what this file's own
+      // "cache lifetime is asymmetric on purpose" block replaced.
       expect((await service.profileStatus('claude', { id: 'work', configDir: '/work' })).status)
         .toBe('disconnected');
       expect(calls).toBe(2);

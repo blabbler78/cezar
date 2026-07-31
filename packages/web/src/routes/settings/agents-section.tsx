@@ -20,7 +20,6 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
-import { cn } from '@/lib/utils'
 import { providerStatusFor } from '@/lib/provider-status'
 import {
   DefaultAgentPicker,

@@ -284,6 +284,112 @@ describe('the agent accounts section', () => {
     expect(row.querySelector('[data-action="account-remove"]')).not.toBeNull()
   })
 
+  /**
+   * How a user actually signs a second account in. This is the gap that let the whole affordance
+   * ship missing: the pane was thoroughly tested for rename, remove, details, open and selection,
+   * and never asked how anyone logs in — while three separate strings told them to press Connect.
+   */
+  describe('signing an account in', () => {
+    it('offers Connect on an account that is not signed in, aimed at THAT account', async () => {
+      serve({
+        editable: true,
+        profileCapableProviders: ['claude', 'codex'],
+        selections: {},
+        defaults: {},
+        profiles: [...DEFAULTS, profile({
+          id: 'klaudiusz',
+          label: 'Klaudiusz',
+          status: { provider: 'claude', status: 'disconnected' },
+        })],
+      })
+      renderAccounts()
+
+      const row = await waitFor(() => {
+        expect(rowFor('klaudiusz')).not.toBeNull()
+        return rowFor('klaudiusz')!
+      })
+      fireEvent.click(row.querySelector('[data-action="account-connect"]')!)
+
+      await waitFor(() => expect(requests.some((r) => r.url === '/api/v1/providers/connect')).toBe(true))
+      // `profileId` is the whole point: without it the server signs the user into the DISCOVERED
+      // account and reports success, which is the failure that made this a merge blocker.
+      expect(requests.find((r) => r.url === '/api/v1/providers/connect')?.body).toEqual({
+        provider: 'claude',
+        profileId: 'klaudiusz',
+      })
+    })
+
+    it('sends no profileId for the discovered account — it has no stored id', async () => {
+      serve({
+        editable: true,
+        profileCapableProviders: ['claude', 'codex'],
+        selections: {},
+        defaults: {},
+        profiles: [profile({
+          id: 'default',
+          label: 'Default',
+          isDefault: true,
+          status: { provider: 'claude', status: 'disconnected' },
+        })],
+      })
+      renderAccounts()
+
+      const row = await waitFor(() => {
+        expect(rowFor('default')).not.toBeNull()
+        return rowFor('default')!
+      })
+      fireEvent.click(row.querySelector('[data-action="account-connect"]')!)
+
+      await waitFor(() => expect(requests.some((r) => r.url === '/api/v1/providers/connect')).toBe(true))
+      expect(requests.find((r) => r.url === '/api/v1/providers/connect')?.body).toEqual({
+        provider: 'claude',
+      })
+    })
+
+    it('hides Connect once the account IS signed in, but keeps Check again', async () => {
+      serve({
+        editable: true,
+        profileCapableProviders: ['claude', 'codex'],
+        selections: {},
+        defaults: {},
+        profiles: [...DEFAULTS, profile({
+          id: 'klaudiusz',
+          status: { provider: 'claude', status: 'connected' },
+        })],
+      })
+      renderAccounts()
+
+      const row = await waitFor(() => {
+        expect(rowFor('klaudiusz')).not.toBeNull()
+        return rowFor('klaudiusz')!
+      })
+      await waitFor(() => expect(row.querySelector('[data-action="account-connect"]')).toBeNull())
+      // A connected account can still have been logged out elsewhere, and the listing serves a
+      // cached answer for minutes — so the re-check is what makes that recoverable.
+      expect(row.querySelector('[data-action="account-recheck"]')).not.toBeNull()
+    })
+
+    it('re-checks ONE account for real, with refresh=1', async () => {
+      serve({
+        editable: true,
+        profileCapableProviders: ['claude', 'codex'],
+        selections: {},
+        defaults: {},
+        profiles: [...DEFAULTS, profile({ id: 'klaudiusz' })],
+      })
+      renderAccounts()
+
+      const row = await waitFor(() => {
+        expect(rowFor('klaudiusz')).not.toBeNull()
+        return rowFor('klaudiusz')!
+      })
+      fireEvent.click(row.querySelector('[data-action="account-recheck"]')!)
+
+      await waitFor(() =>
+        expect(requests.some((r) => r.url.includes('/status?refresh=1'))).toBe(true))
+    })
+  })
+
   it('keeps Rename and Remove off the collapsed row, behind Show details', async () => {
     serve({
       defaults: {},

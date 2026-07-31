@@ -7,6 +7,7 @@ import {
   ApiError,
   browseFs,
   checkoutProject,
+  connectProvider,
   continueRun,
   createAgentProfile,
   getAgentConfig,
@@ -455,6 +456,49 @@ export function useAgentAccountStatus(routeId: string, enabled: boolean) {
     enabled,
     staleTime: 60_000,
     retry: false,
+  })
+}
+
+/**
+ * Sign IN to one agent account — the last mile of "add account → Connect → the CLI creates the
+ * folder", which is the documented first-run sequence and the only way a second login can be
+ * created from cezar.
+ *
+ * Invalidates both the account listing and the provider card: the login the user just opened is
+ * for a named account, but the terminal they finish it in can equally be the discovered one, and a
+ * stale card is what makes people press Connect twice.
+ */
+export function useConnectAgentAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ provider, profileId }: { provider: ProviderId; profileId?: string }) =>
+      connectProvider(provider, profileId),
+    retry: false,
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.agentProfiles }),
+        queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.providerStatus }),
+      ])
+    },
+  })
+}
+
+/**
+ * Re-probe ONE account for real (`?refresh=1`), for the "Check again" the pane offers beside
+ * Connect — the affordance the cached-by-default listing is designed around.
+ *
+ * Writes the answer straight into the per-account status cache so the row updates without a second
+ * round-trip, and never retries: the interesting failures here are the server's own refusals.
+ */
+export function useRecheckAgentAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (routeId: string) => getAgentAccountStatus(routeId, { refresh: true }),
+    retry: false,
+    onSuccess: (answer, routeId) => {
+      queryClient.setQueryData(workspaceQueryKeys.agentAccountStatus(routeId), answer)
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.agentProfiles })
+    },
   })
 }
 

@@ -217,7 +217,13 @@ export const createAgentProfileInputSchema = z.object({
 });
 export type CreateAgentProfileInput = z.infer<typeof createAgentProfileInputSchema>;
 
-/** `POST` / `PATCH /api/v1/workspace/agent-profiles/:id` — the affected row, re-probed. */
+/**
+ * `POST` / `PATCH /api/v1/workspace/agent-profiles/:id` — the affected row.
+ *
+ * Answered WITHOUT waiting for a probe, like the listing: `status` is absent and the server kicks
+ * the re-learn off behind the response, so adding an account does not block on a CLI spawn. The
+ * pane's own request for that row joins the same in-flight probe rather than starting a second.
+ */
 export const agentProfileResponseSchema = z.object({ profile: agentProfileSchema });
 export type AgentProfileResponse = z.infer<typeof agentProfileResponseSchema>;
 

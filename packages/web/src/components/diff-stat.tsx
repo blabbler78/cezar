@@ -17,18 +17,22 @@ import { cn } from '@/lib/utils'
  * it is right for a *different* reason than the one next to it, so it says so: a dotted
  * underline and `cursor-help` advertise the explanation, the `title` carries it, and
  * `data-repointed` lets a surface style or assert on it without re-deriving the rule.
+ *
+ * That caveat also gets an `aria-label`, which the plain case deliberately does NOT: `title`
+ * is unreliable for screen readers and unreachable on touch, and here it carries meaning
+ * (*what these numbers measure*) rather than a restatement of the visible text. Without it,
+ * assistive tech would read the narrowed number as if it were an ordinary one.
  */
 export function DiffStatLabel({ stat, className }: { stat: DiffStat; className?: string }) {
   const counts = `+${stat.adds} −${stat.dels} across ${stat.files} ${stat.files === 1 ? 'file' : 'files'}`
+  const caveat = stat.repointed
+    ? `${counts} — uncommitted changes only: this task's worktree has another branch checked out`
+    : undefined
   return (
     <span
       data-slot="diff-stat"
-      {...(stat.repointed ? { 'data-repointed': 'true' } : {})}
-      title={
-        stat.repointed
-          ? `${counts} — uncommitted changes only: this task's worktree has another branch checked out`
-          : counts
-      }
+      {...(caveat ? { 'data-repointed': 'true', 'aria-label': caveat } : {})}
+      title={caveat ?? counts}
       className={cn(
         'font-mono text-xs font-semibold tabular-nums',
         stat.repointed && 'cursor-help underline decoration-dotted underline-offset-2',

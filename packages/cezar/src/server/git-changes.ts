@@ -277,11 +277,9 @@ export async function collectChanges(
     // repointed the worktree onto someone else's branch (#591). The rule is shared with
     // `worktreeShortstat` (#751); ref resolution never reads the index, so it deliberately
     // runs WITHOUT the scratch-index `env`.
-    const { base, repointedHead } = await resolveTaskDiffBase(
-      (args) => git(dir, args),
-      baseBranch,
-      opts.taskBranch ? { taskBranch: opts.taskBranch } : {},
-    );
+    const { base, repointedHead } = await resolveTaskDiffBase((args) => git(dir, args), baseBranch, {
+      taskBranch: opts.taskBranch,
+    });
 
     const nameStatus = await git(dir, ['diff', '--name-status', '-z', '-M', base], env);
     if (!nameStatus.ok) return { ok: false, error: gitReason(nameStatus, 'git diff failed') };

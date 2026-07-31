@@ -31,6 +31,9 @@ describe('DiffStatLabel', () => {
     const el = renderStat({ adds: 10, dels: 2, files: 3 })
     expect(el.getAttribute('data-repointed')).toBeNull()
     expect(el.className).not.toContain('underline')
+    // No aria-label either: on a plain stat the tooltip only restates the visible
+    // text, so overriding the accessible name would make it worse, not better.
+    expect(el.getAttribute('aria-label')).toBeNull()
   })
 
   /**
@@ -47,6 +50,9 @@ describe('DiffStatLabel', () => {
     // Discoverable without a hover-only affordance being the only signal.
     expect(el.className).toContain('cursor-help')
     expect(el.className).toContain('decoration-dotted')
+    // `title` is unreliable for screen readers and unreachable on touch, and here it
+    // carries meaning rather than a restatement — so the caveat is in the a11y name too.
+    expect(el.getAttribute('aria-label')).toBe(el.title)
   })
 
   it('still renders the real numbers when they are all zero and repointed', () => {

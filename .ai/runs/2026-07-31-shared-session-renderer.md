@@ -54,6 +54,8 @@ Replace the sub-agent pane's reduced transcript path with the same backend-neutr
 
 ## Progress
 
+PR: #756
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Extract and stabilize the shared renderer

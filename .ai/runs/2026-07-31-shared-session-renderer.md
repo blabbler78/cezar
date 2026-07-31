@@ -50,6 +50,7 @@ Replace the sub-agent pane's reduced transcript path with the same backend-neutr
 - Recursive rendering can introduce circular imports; orchestration stays in the session renderer and leaf cards receive a callback.
 - Two active transcript surfaces can corrupt one another's scroll state; every viewport key is namespaced by run and view.
 - User-facing panel behavior needs manual QA after code review; this run requests `needs-qa` and leaves QA approval to the parent workflow.
+- `npm run test:e2e` was invoked during implementation but returned the repository's explicit `TEST_E2E_STATUS=skipped` outcome because the browser provider could not launch; manual/browser evidence remains for the parent QA workflow.
 
 ## Progress
 
@@ -72,5 +73,5 @@ Replace the sub-agent pane's reduced transcript path with the same backend-neutr
 ### Phase 3: Backend and scale verification
 
 - [x] 3.1 Add backend-neutral reducer-to-component coverage — 7aeacec7
-- [ ] 3.2 Add long transcript and image regression coverage
-- [ ] 3.3 Complete full validation and verification preparation
+- [x] 3.2 Add long transcript and image regression coverage — 9f2ec330
+- [x] 3.3 Complete full validation and verification preparation — 9f2ec330

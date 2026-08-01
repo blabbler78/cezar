@@ -597,6 +597,21 @@ describe('notes panel', () => {
 })
 
 describe('meta line, tabs, pill and resume hint', () => {
+  it('scrolls the run header on phones but restores sticky context on desktop', () => {
+    stubFetch()
+    renderHeader(run('done'))
+
+    const header = document.querySelector('[data-slot="run-header"]') as HTMLElement
+    const classes = header.className.split(/\s+/)
+    expect(classes).toContain('relative')
+    expect(classes).not.toContain('sticky')
+    expect(classes).not.toContain('top-0')
+    expect(classes).toContain('md:sticky')
+    expect(classes).toContain('md:top-0')
+    expect(classes).toContain('px-3')
+    expect(classes).toContain('md:px-6')
+  })
+
   it('meta shows workflow · branch chip · ± · input/output · cost, with runner/model tucked into the agent badge', () => {
     stubFetch()
     renderHeader(

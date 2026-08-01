@@ -1,8 +1,9 @@
 # Execution plan — mobile task reading mode
 
-**Branch:** `fix/mobile-task-reading-mode`
+**Branch:** `fix/mobile-task-reading-mode-contrib`
 **Base:** `main`
 **Skill:** `om-auto-create-pr`
+**PR:** [#764](https://github.com/open-mercato/cezar/pull/764)
 
 ## Goal
 
@@ -61,17 +62,17 @@ leave roughly half of a 320×568 viewport for the agent transcript.
 
 ### Phase 1: Reclaim mobile viewport height
 
-- [x] 1.1 Reduce the global mobile bar to 44px
-- [x] 1.2 Make the run header sticky only on desktop and tighten phone spacing
-- [x] 1.3 Compact workflow, transcript and bottom composer surfaces on phones
+- [x] 1.1 Reduce the global mobile bar to 44px — 5877ba7c
+- [x] 1.2 Make the run header sticky only on desktop and tighten phone spacing — 5877ba7c
+- [x] 1.3 Compact workflow, transcript and bottom composer surfaces on phones — 5877ba7c
 
 ### Phase 2: Regression coverage
 
-- [x] 2.1 Add focused responsive component tests
-- [ ] 2.2 Verify 320×568, 360×640, and 390×844 in a real browser
+- [x] 2.1 Add focused responsive component tests — 5877ba7c
+- [x] 2.2 Verify 320×568, 360×640, and 390×844 in a real browser — 2/2 changed scenarios passed
 
 ### Phase 3: Validation and review
 
 - [ ] 3.1 Full validation gate green
-- [ ] 3.2 Mobile before/after evidence attached to the PR
-- [ ] 3.3 Complete diff review clean
+- [x] 3.2 Mobile before/after evidence attached to the PR — [evidence](https://github.com/open-mercato/cezar/pull/764#issuecomment-5150618643)
+- [x] 3.3 Complete diff review clean — touch-target regression found and removed before the replacement PR

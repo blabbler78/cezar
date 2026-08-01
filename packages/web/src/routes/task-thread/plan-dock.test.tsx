@@ -90,6 +90,11 @@ describe('PlanDock', () => {
     expect(rows[2]!.querySelector('[data-slot="plan-tag"]')).toBeNull()
     // Expanded: the current-item line belongs to the collapsed head only.
     expect(document.querySelector('[data-slot="plan-current"]')).toBeNull()
+    // Phone spacing is compact, with the current desktop dimensions restored at md.
+    expect(document.querySelector('[data-slot="grad-edge"]')?.className).toContain('h-0.5')
+    expect(document.querySelector('[data-slot="grad-edge"]')?.className).toContain('md:h-[3px]')
+    expect(head().className).toContain('pt-1.5')
+    expect(head().className).toContain('md:pt-2')
   })
 
   // Regression: an opencode `cancelled` todo used to be dropped by the mapper and
@@ -126,6 +131,8 @@ describe('PlanDock', () => {
     expect(document.querySelector('[data-slot="plan-list"]')).toBeNull()
     // The in-progress entry, spelled with its present-continuous activeForm.
     expect(document.querySelector('[data-slot="plan-current"]')?.textContent).toBe('— Running tests')
+    expect(head().className).toContain('py-1.5')
+    expect(head().className).toContain('md:py-2')
   })
 
   it('falls back to the entry content when the current item has no activeForm', () => {

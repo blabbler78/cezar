@@ -3,6 +3,7 @@
 **Branch:** `fix/mobile-task-reading-mode`
 **Base:** `main`
 **Skill:** `om-auto-create-pr`
+**PR:** [#763](https://github.com/open-mercato/cezar/pull/763)
 
 ## Goal
 
@@ -61,13 +62,13 @@ leave roughly half of a 320×568 viewport for the agent transcript.
 
 ### Phase 1: Reclaim mobile viewport height
 
-- [ ] 1.1 Reduce the global mobile bar to 44px
-- [ ] 1.2 Make the run header sticky only on desktop and tighten phone spacing
-- [ ] 1.3 Compact workflow, transcript and bottom composer surfaces on phones
+- [x] 1.1 Reduce the global mobile bar to 44px
+- [x] 1.2 Make the run header sticky only on desktop and tighten phone spacing
+- [x] 1.3 Compact workflow, transcript and bottom composer surfaces on phones
 
 ### Phase 2: Regression coverage
 
-- [ ] 2.1 Add focused responsive component tests
+- [x] 2.1 Add focused responsive component tests
 - [ ] 2.2 Verify 320×568, 360×640, and 390×844 in a real browser
 
 ### Phase 3: Validation and review

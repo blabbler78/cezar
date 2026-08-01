@@ -62,12 +62,15 @@ export function PlanDock({ runId, entries }: { runId: string; entries: PlanEntry
       className="min-w-0 overflow-hidden rounded-lg border border-border bg-card shadow-xs"
     >
       {/* The mockup's `.grad-edge` — the brand gradient as a hairline top edge. */}
-      <div aria-hidden data-slot="grad-edge" className="h-[3px]" style={{ background: 'var(--grad)' }} />
+      <div aria-hidden data-slot="grad-edge" className="h-0.5 md:h-[3px]" style={{ background: 'var(--grad)' }} />
       <button
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className={cn('flex w-full items-center gap-2 px-3.5 text-left text-[13px]', open ? 'pt-2 pb-1.5' : 'py-2')}
+        className={cn(
+          'flex w-full items-center gap-2 px-3 text-left text-[13px] md:px-3.5',
+          open ? 'pt-1.5 pb-1 md:pt-2 md:pb-1.5' : 'py-1.5 md:py-2',
+        )}
       >
         <span className="shrink-0 font-semibold">Plan</span>
         <span data-slot="plan-count" className="shrink-0 text-muted-foreground tabular-nums">

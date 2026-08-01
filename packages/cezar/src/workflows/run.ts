@@ -112,6 +112,16 @@ export function periodicAutosaveEnabled(env: NodeJS.ProcessEnv = process.env): b
   return env.CEZ_AUTOSAVE === '1';
 }
 
+/**
+ * Explicitly opt out of the repository-root lease for runs that execute in the
+ * current checkout (`worktree: false`). This is intentionally unsafe: concurrent
+ * agents may overwrite each other's files or Git state. Isolated worktree runs
+ * are unaffected.
+ */
+export function repositoryRootLockDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CEZ_DISABLE_REPO_LOCK === '1';
+}
+
 interface ActiveRun {
   cancelled: boolean;
   interrupt: () => void;
@@ -1495,19 +1505,26 @@ export class RunManager {
     this.active.set(runId, state);
     this.starting.delete(runId);
     if (state.cwd === this.repoRoot) {
-      this.store.appendEvent(runId, {
-        type: 'note',
-        message: 'waiting for exclusive access to the repository working tree',
-      });
-      if (!(await this.acquireRepoRoot(runId, state))) {
-        this.store.updateRun(runId, {
-          status: 'cancelled',
-          finishedAt: new Date().toISOString(),
-          currentStepId: undefined,
+      if (repositoryRootLockDisabled()) {
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: 'repository-root lock disabled by CEZ_DISABLE_REPO_LOCK=1 (shared checkout is unsafe)',
         });
-        this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
-        this.dropActive(runId);
-        return;
+      } else {
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: 'waiting for exclusive access to the repository working tree',
+        });
+        if (!(await this.acquireRepoRoot(runId, state))) {
+          this.store.updateRun(runId, {
+            status: 'cancelled',
+            finishedAt: new Date().toISOString(),
+            currentStepId: undefined,
+          });
+          this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
+          this.dropActive(runId);
+          return;
+        }
       }
     }
     this.armAutosave(state);
@@ -1883,14 +1900,21 @@ export class RunManager {
     }
 
     if (state.cwd === this.repoRoot) {
-      emit({
-        type: 'note',
-        message: 'waiting for exclusive access to the repository working tree',
-      });
-      // A cancel during the wait leaves the lease ungranted; the step loop
-      // below breaks on `cancelled` before touching the tree and settles the
-      // run through the usual path.
-      await this.acquireRepoRoot(runId, state);
+      if (repositoryRootLockDisabled()) {
+        emit({
+          type: 'note',
+          message: 'repository-root lock disabled by CEZ_DISABLE_REPO_LOCK=1 (shared checkout is unsafe)',
+        });
+      } else {
+        emit({
+          type: 'note',
+          message: 'waiting for exclusive access to the repository working tree',
+        });
+        // A cancel during the wait leaves the lease ungranted; the step loop
+        // below breaks on `cancelled` before touching the tree and settles the
+        // run through the usual path.
+        await this.acquireRepoRoot(runId, state);
+      }
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the

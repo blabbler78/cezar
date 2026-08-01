@@ -597,7 +597,7 @@ describe('notes panel', () => {
 })
 
 describe('meta line, tabs, pill and resume hint', () => {
-  it('collapses dense run details on mobile and reveals them on demand', () => {
+  it('collapses dense run details by default and reveals them on demand', () => {
     stubFetch()
     renderHeader(
       run('done', {
@@ -607,10 +607,10 @@ describe('meta line, tabs, pill and resume hint', () => {
       }),
     )
 
-    const details = document.querySelector('[data-slot="run-mobile-details"]') as HTMLElement
+    const details = document.querySelector('[data-slot="run-details"]') as HTMLElement
     const toggle = screen.getByRole('button', { name: 'Show run details' })
     expect(details.className).toContain('hidden')
-    expect(details.className).toContain('md:block')
+    expect(details.className).not.toContain('md:block')
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(toggle.getAttribute('aria-controls')).toBe(details.id)
 

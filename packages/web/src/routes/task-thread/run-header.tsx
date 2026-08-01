@@ -119,8 +119,8 @@ export function RunHeader({
   const flags = runActionFlags(run)
   const hint = resumeHint(run)
   const [notesOpen, setNotesOpen] = useState(false)
-  const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false)
-  const mobileDetailsId = useId()
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const detailsId = useId()
   const actions = useRunActions(run)
 
   // The queue position a parked run shows in its pill ("queued #2"). Reads the shared runs-list
@@ -158,15 +158,14 @@ export function RunHeader({
             <Button
               variant="ghost"
               size="icon-sm"
-              className="md:hidden"
-              aria-label={mobileDetailsOpen ? 'Hide run details' : 'Show run details'}
-              aria-controls={mobileDetailsId}
-              aria-expanded={mobileDetailsOpen}
-              onClick={() => setMobileDetailsOpen((open) => !open)}
+              aria-label={detailsOpen ? 'Hide run details' : 'Show run details'}
+              aria-controls={detailsId}
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen((open) => !open)}
             >
               <ChevronDownIcon
                 aria-hidden="true"
-                className={mobileDetailsOpen ? 'rotate-180 transition-transform' : 'transition-transform'}
+                className={detailsOpen ? 'rotate-180 transition-transform' : 'transition-transform'}
               />
             </Button>
             <ActionsKebab run={run} actions={actions} onToggleNotes={() => setNotesOpen((open) => !open)} />
@@ -174,9 +173,9 @@ export function RunHeader({
         </div>
 
         <div
-          id={mobileDetailsId}
-          data-slot="run-mobile-details"
-          className={mobileDetailsOpen ? 'block md:block' : 'hidden md:block'}
+          id={detailsId}
+          data-slot="run-details"
+          className={detailsOpen ? 'block' : 'hidden'}
         >
           <MetaRow
             run={run}

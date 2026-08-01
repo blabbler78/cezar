@@ -73,6 +73,6 @@ leave roughly half of a 320×568 viewport for the agent transcript.
 
 ### Phase 3: Validation and review
 
-- [ ] 3.1 Full validation gate green
+- [x] 3.1 Full validation gate green — typecheck; Vitest 4969/4969; node:test 35 pass + 1 platform skip; build/pack; package 12/12
 - [x] 3.2 Mobile before/after evidence attached to the PR — [evidence](https://github.com/open-mercato/cezar/pull/764#issuecomment-5150618643)
 - [x] 3.3 Complete diff review clean — touch-target regression found and removed before the replacement PR

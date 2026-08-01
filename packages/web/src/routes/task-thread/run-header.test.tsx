@@ -597,6 +597,32 @@ describe('notes panel', () => {
 })
 
 describe('meta line, tabs, pill and resume hint', () => {
+  it('collapses dense run details on mobile and reveals them on demand', () => {
+    stubFetch()
+    renderHeader(
+      run('done', {
+        branch: 'cez/r1',
+        diffStat: { adds: 42, dels: 7, files: 3 },
+        costUsd: 0.04,
+      }),
+    )
+
+    const details = document.querySelector('[data-slot="run-mobile-details"]') as HTMLElement
+    const toggle = screen.getByRole('button', { name: 'Show run details' })
+    expect(details.className).toContain('hidden')
+    expect(details.className).toContain('md:block')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(toggle.getAttribute('aria-controls')).toBe(details.id)
+
+    fireEvent.click(toggle)
+
+    expect(details.className).toContain('block')
+    expect(details.className).not.toContain('hidden')
+    expect(screen.getByRole('button', { name: 'Hide run details' }).getAttribute('aria-expanded')).toBe('true')
+    expect(details.textContent).toContain('cez/r1')
+    expect(details.textContent).toContain('IN 24.6k · OUT 2.4k')
+  })
+
   it('meta shows workflow · branch chip · ± · input/output · cost, with runner/model tucked into the agent badge', () => {
     stubFetch()
     renderHeader(

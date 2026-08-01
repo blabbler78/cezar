@@ -6,6 +6,7 @@ import {
   BoxesIcon,
   BracesIcon,
   CheckIcon,
+  ChevronDownIcon,
   CircleStopIcon,
   CodeIcon,
   CopyIcon,
@@ -33,7 +34,7 @@ import {
   WavesIcon,
   ZapIcon,
 } from 'lucide-react'
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useId, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from '@/lib/project-router'
 
 import { ApiError, archiveRun, cancelRun, continueRun, deleteRun, openRunIn, openRunInCli } from '@/api/client'
@@ -118,6 +119,8 @@ export function RunHeader({
   const flags = runActionFlags(run)
   const hint = resumeHint(run)
   const [notesOpen, setNotesOpen] = useState(false)
+  const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false)
+  const mobileDetailsId = useId()
   const actions = useRunActions(run)
 
   // The queue position a parked run shows in its pill ("queued #2"). Reads the shared runs-list
@@ -141,7 +144,10 @@ export function RunHeader({
             {planTally ? (
               // The plan dock's compact mirror (spec: "mirrored as a compact progress line in
               // the run header").
-              <span data-slot="plan-mirror" className="text-[11px] text-soft-foreground tabular-nums">
+              <span
+                data-slot="plan-mirror"
+                className="hidden text-[11px] text-soft-foreground tabular-nums md:inline"
+              >
                 Plan {planTally.done}/{planTally.total}
               </span>
             ) : null}
@@ -149,16 +155,36 @@ export function RunHeader({
               {attention.label}
               {queuePosition !== undefined ? ` #${queuePosition}` : ''}
             </Pill>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="md:hidden"
+              aria-label={mobileDetailsOpen ? 'Hide run details' : 'Show run details'}
+              aria-controls={mobileDetailsId}
+              aria-expanded={mobileDetailsOpen}
+              onClick={() => setMobileDetailsOpen((open) => !open)}
+            >
+              <ChevronDownIcon
+                aria-hidden="true"
+                className={mobileDetailsOpen ? 'rotate-180 transition-transform' : 'transition-transform'}
+              />
+            </Button>
             <ActionsKebab run={run} actions={actions} onToggleNotes={() => setNotesOpen((open) => !open)} />
           </span>
         </div>
 
-        <MetaRow
-          run={run}
-          showTokens={metricVisibility.tokens}
-          showCost={metricVisibility.cost}
-        />
-        <MonitoringSchedule run={run} />
+        <div
+          id={mobileDetailsId}
+          data-slot="run-mobile-details"
+          className={mobileDetailsOpen ? 'block md:block' : 'hidden md:block'}
+        >
+          <MetaRow
+            run={run}
+            showTokens={metricVisibility.tokens}
+            showCost={metricVisibility.cost}
+          />
+          <MonitoringSchedule run={run} />
+        </div>
 
         <div data-slot="run-tabs" className="mt-2.5 flex items-end gap-1">
           <TabLink to={`/tasks/${run.id}`} active={tab === 'session'}>

@@ -7,6 +7,7 @@ import {
   GlobeIcon,
   ListTodoIcon,
   LoaderCircleIcon,
+  PaperclipIcon,
   SearchIcon,
   SquarePenIcon,
   SquareTerminalIcon,
@@ -18,7 +19,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ZoomableImage } from '@/components/zoomable-image'
 import { Link } from '@/lib/project-router'
-import type { FileDiff, ToolKind, UiToolItem } from '@open-mercato/cezar-api-client'
+import { isImageAttachmentName, type FileDiff, type ToolKind, type UiToolItem } from '@open-mercato/cezar-api-client'
 import { cn } from '@/lib/utils'
 
 import { Markdown } from './markdown'
@@ -38,7 +39,8 @@ export { isNearBottom }
  */
 
 /** Right-aligned muted bubble — a v1 `user-message` line or the run's initial task. Renders any
- *  attached images inline; falls back to a count only when the URLs aren't available (older runs).
+ *  attached images inline and non-image attachments as download chips (#950); falls back to a
+ *  count only when the URLs aren't available (older runs).
  *
  *  The text renders as MARKDOWN, like `AssistantMessage` (#524): what a user sends is markdown as
  *  often as what the agent replies — the GitHub hand-off prompt alone carries a `#N` heading-ish
@@ -195,15 +197,31 @@ export function UserBubble({
       {actionError ? <p role="alert" className="mb-1 text-xs text-danger">{actionError}</p> : null}
       <Markdown breaks>{text}</Markdown>
       {images.length > 0 ? (
-        <span data-slot="user-images" className="mt-2 flex flex-wrap justify-end gap-1.5">
-          {images.map((url) => (
-            <ZoomableImage
-              key={url}
-              src={url}
-              alt="attached"
-              className="max-h-40 max-w-[220px] rounded-md border border-border object-contain"
-            />
-          ))}
+        <span data-slot="user-images" className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+          {/* One list carries both kinds (#950), so the NAME decides how each entry renders: an
+              image is shown, a file is offered as a download — rendering a `.pdf` in an `<img>`
+              would show the user a broken image where their attachment should be. */}
+          {images.map((url) =>
+            isImageAttachmentName(url.split('/').pop() ?? '') ? (
+              <ZoomableImage
+                key={url}
+                src={url}
+                alt="attached"
+                className="max-h-40 max-w-[220px] rounded-md border border-border object-contain"
+              />
+            ) : (
+              <a
+                key={url}
+                href={url}
+                download
+                data-slot="user-file"
+                className="inline-flex max-w-[220px] items-center gap-1.5 rounded-md border border-border bg-background/60 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <PaperclipIcon aria-hidden="true" className="size-3.5 shrink-0" />
+                <span className="truncate">{url.split('/').pop()}</span>
+              </a>
+            ),
+          )}
         </span>
       ) : null}
       {missing > 0 ? (
@@ -242,6 +260,7 @@ const PROVIDER_LABEL: Record<ThreadProviderAuthRequired['provider'], string> = {
   claude: 'Claude Code',
   codex: 'Codex',
   opencode: 'OpenCode',
+  pi: 'pi',
 }
 
 /** Persisted recovery guidance for an authoritative runtime authentication rejection. */
@@ -490,10 +509,12 @@ export function ToolCard({
   item,
   nested = [],
   cacheKey,
+  renderNested,
 }: {
   item: UiToolItem
-  nested?: ThreadEntry[]
+  nested?: readonly ThreadEntry[]
   cacheKey?: string
+  renderNested?: (entries: readonly ThreadEntry[], scope: string) => ReactNode
 }) {
   const cache = useThreadCardCache()
   const [userOpen, setUserOpenState] = useState<boolean | null>(
@@ -583,40 +604,13 @@ export function ToolCard({
           ) : null}
           {nested.length > 0 ? (
             <div data-slot="tool-nested" className="flex flex-col gap-2 border-l-2 border-border py-2.5 pr-3 pl-3 ml-4 my-2">
-              {nested.map((entry) => (
-                <NestedEntry key={entry.id} entry={entry} scope={cacheKey} />
-              ))}
+              {renderNested?.(nested, cacheKey ?? item.id)}
             </div>
           ) : null}
         </div>
       </CollapsibleContent>
     </Collapsible>
   )
-}
-
-/** A sub-agent entry inside a Task card — one level deep by design, so nested tools render
- *  without their own children. `scope` is the parent card's cache key, extended per child.
- *
- *  Exported for the sub-agent sheet (#474), which renders the SAME child entries in a focused
- *  panel: the drill-down must look like the inline nesting, not like a second renderer that
- *  drifts from it. */
-export function NestedEntry({ entry, scope }: { entry: ThreadEntry; scope?: string }) {
-  switch (entry.kind) {
-    case 'message':
-      return <AssistantMessage text={entry.text} />
-    case 'reasoning':
-      return <ReasoningItem text={entry.text} />
-    case 'tool':
-      return <ToolCard item={entry} cacheKey={scope !== undefined ? `${scope}:${entry.id}` : undefined} />
-    case 'note':
-      return <NoteLine note={entry} />
-    case 'image':
-      return <ImageItem image={entry} />
-    case 'ask':
-      // AskUser cards are always top-level turn entries (#473) — they never nest
-      // under a tool group, so there is nothing to render here.
-      return null
-  }
 }
 
 /** "Explored N files · M searches" — consecutive finished read/search tools, one row,

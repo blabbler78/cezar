@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
-  clearDraftText,
+  clearStartedDraft,
+  composerRunModeNote,
   readDraft,
   resetDraft,
   resolveComposerRunMode,
@@ -64,6 +65,7 @@ describe('the new-task draft store', () => {
       text: '',
       source: null,
       runner: null,
+      agentProfile: null,
       model: null,
       variants: 1,
       planFirst: false,
@@ -78,6 +80,7 @@ describe('the new-task draft store', () => {
       text: 'fix it',
       source: { source: 'skill', ref: 'om-fix' },
       runner: 'codex',
+      agentProfile: null,
       model: 'gpt-5-codex',
       variants: 2,
       planFirst: false,
@@ -93,11 +96,12 @@ describe('the new-task draft store', () => {
     expect(readDraft().text).toBe('fix it')
   })
 
-  it('clearDraftText spends the text but keeps the picker choices (legacy keeps its pills)', () => {
+  it('clearStartedDraft spends the text AND the source, keeping the way-of-working pills', () => {
     writeDraft({
       text: 'shipped',
-      source: { source: 'workflow', ref: 'quick-task' },
+      source: { source: 'skill', ref: 'om-fix' },
       runner: null,
+      agentProfile: null,
       model: 'opus',
       variants: 3,
       planFirst: true,
@@ -105,11 +109,14 @@ describe('the new-task draft store', () => {
       autonomous: null,
       generateFollowups: true,
     })
-    clearDraftText()
+    clearStartedDraft()
     expect(readDraft()).toEqual({
       text: '',
-      source: { source: 'workflow', ref: 'quick-task' },
+      // The skill goes with the task it ran: the next `/new` starts with none.
+      source: null,
       runner: null,
+      agentProfile: null,
+      // Runner/model/variants/plan-first are a way of working — they survive, as they always did.
       model: 'opus',
       variants: 3,
       planFirst: true,
@@ -124,6 +131,7 @@ describe('the new-task draft store', () => {
       text: 'do not lose me',
       source: { source: 'skill', ref: 'om-fix' },
       runner: 'claude',
+      agentProfile: null,
       model: 'sonnet',
       variants: 2,
       planFirst: true,
@@ -152,6 +160,7 @@ describe('the new-task draft store', () => {
       text: '',
       source: null,
       runner: null,
+      agentProfile: null,
       model: null,
       variants: 1,
       planFirst: false,
@@ -166,6 +175,7 @@ describe('the new-task draft store', () => {
       text: '',
       source: null,
       runner: null,
+      agentProfile: null,
       model: null,
       variants: 1,
       planFirst: false,
@@ -173,5 +183,41 @@ describe('the new-task draft store', () => {
       autonomous: null,
       generateFollowups: null,
     })
+  })
+})
+
+describe('composerRunModeNote (#793)', () => {
+  // One line per place the run can land. The header used to print the first one unconditionally,
+  // so the other two states read as an outright false promise of isolation.
+  const cases: Array<{ worktree: boolean; hasGit: boolean; expected: string }> = [
+    {
+      worktree: true,
+      hasGit: true,
+      expected: 'Runs in an isolated worktree — review everything before it lands.',
+    },
+    {
+      worktree: false,
+      hasGit: true,
+      expected: 'Runs in the repo working tree — your checkout is modified directly.',
+    },
+    {
+      worktree: false,
+      hasGit: false,
+      expected: 'Runs in place — no git repository detected, so there is no worktree to isolate in.',
+    },
+  ]
+
+  for (const { worktree, hasGit, expected } of cases) {
+    it(`worktree=${worktree}, hasGit=${hasGit}`, () => {
+      expect(composerRunModeNote({ worktree, hasGit })).toBe(expected)
+    })
+  }
+
+  it('never promises isolation without a worktree', () => {
+    // The invariant the header actually owes the user, independent of the exact copy: the word
+    // only appears when the run really gets one.
+    for (const hasGit of [true, false]) {
+      expect(composerRunModeNote({ worktree: false, hasGit })).not.toContain('isolated worktree')
+    }
   })
 })

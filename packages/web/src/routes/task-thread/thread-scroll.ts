@@ -19,6 +19,47 @@ export const VIRTUALIZE_THRESHOLD = 300
 
 /** ~80px per the research: pin-to-bottom while streaming only when the reader is this close. */
 export const NEAR_BOTTOM_SLACK_PX = 80
+export const HISTORY_BOUNDARY_SLACK_PX = 600
+
+/** Intent handlers only consume an older-page arm while the reader is near the retained start. */
+export function isNearHistoryStart(box: { scrollTop: number; clientHeight: number }): boolean {
+  return box.scrollTop < Math.max(HISTORY_BOUNDARY_SLACK_PX, box.clientHeight)
+}
+
+export interface ThreadRowPosition {
+  key: string
+  top: number
+  bottom: number
+}
+
+export interface ThreadRowAnchor {
+  key: string
+  offset: number
+}
+
+/** Capture the first stable row intersecting the viewport, including a partially visible row. */
+export function firstVisibleThreadAnchor(
+  viewportTop: number,
+  rows: readonly ThreadRowPosition[],
+): ThreadRowAnchor | undefined {
+  const row = rows.find(({ bottom }) => bottom > viewportTop)
+  return row === undefined ? undefined : { key: row.key, offset: row.top - viewportTop }
+}
+
+/** Restore a captured row identity even when page eviction changed the total scroll height. */
+export function threadAnchorScrollTop(
+  currentScrollTop: number,
+  viewportTop: number,
+  anchor: ThreadRowAnchor | undefined,
+  rows: readonly ThreadRowPosition[],
+  fallbackTop: number,
+): number {
+  if (anchor === undefined) return fallbackTop
+  const row = rows.find(({ key }) => key === anchor.key)
+  return row === undefined
+    ? fallbackTop
+    : currentScrollTop + (row.top - viewportTop - anchor.offset)
+}
 
 /**
  * The stick rule shared by the thread scroller and the tool-output live tail: the viewport
@@ -51,7 +92,7 @@ export interface ScrollMemory {
   atBottom: boolean
 }
 
-/** Scroll positions per run id — module-level on purpose (the PlanDock collapse-memory
+/** Scroll positions per run/view key — module-level on purpose (the PlanDock collapse-memory
  *  pattern): survives route changes for the browser session, gone on reload, no server state. */
 const scrollByRun = new Map<string, ScrollMemory>()
 
@@ -64,7 +105,7 @@ export function readThreadScroll(runId: string): ScrollMemory | undefined {
 }
 
 /** virtua's per-session measurement cache (research §5: "per-session measurement cache"),
- *  keyed by run id: revisiting a virtualized thread restores measured row heights instead of
+ *  keyed by run/view: revisiting a virtualized thread restores measured row heights instead of
  *  re-estimating, so the restored scroll offset lands on the same content. The snapshot is
  *  opaque, so the row count it was taken at rides along — virtua's documented caveat is that
  *  a snapshot only fits the same item count, and a mid-replay remount must degrade to

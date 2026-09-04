@@ -69,16 +69,15 @@ export interface ThreadAsk {
 export interface ThreadProviderAuthRequired {
   kind: 'provider-auth-required'
   id: string
-  provider: 'claude' | 'codex' | 'opencode'
+  provider: 'claude' | 'codex' | 'opencode' | 'pi'
   authFailureId: string
 }
 
 export type ThreadEntry = UiItem | ThreadNote | ThreadImage | ThreadAsk | ThreadProviderAuthRequired
 
 export interface ThreadTurn {
-  /** Stable render key, assigned in arrival order (`turn-1`, `turn-2`, …). Not the protocol
-   *  turnId: a v1-opened turn gets its v2 id later, and a key that changes mid-stream would
-   *  remount everything under it. */
+  /** Stable source-derived render key. The opening event sequence survives prepended pages;
+   *  ordinal fallback exists only for malformed legacy content with no boundary event. */
   id: string
   /** The protocol-v2 turnId, once known. */
   turnId?: string
@@ -95,6 +94,13 @@ export interface ThreadState {
   turns: ThreadTurn[]
   /** v2 `session.ended` — the last one wins (each step runs its own session). */
   sessionEnded?: { reason: StopReason; message?: string }
+}
+
+export interface ThreadReduceOptions {
+  /** The current assistant turn still belongs to a running session. A complete
+   * trailing ask block is provisional protocol text until turn-end either
+   * emits its card or settles into the readable invalid-marker fallback. */
+  activeTurn?: boolean
 }
 
 /** What the strip under the thread says. Pure so the mapping is table-testable. */
@@ -186,7 +192,9 @@ function str(value: unknown): string | undefined {
 }
 
 function providerId(value: unknown): ThreadProviderAuthRequired['provider'] | undefined {
-  return value === 'claude' || value === 'codex' || value === 'opencode' ? value : undefined
+  return value === 'claude' || value === 'codex' || value === 'opencode' || value === 'pi'
+    ? value
+    : undefined
 }
 
 /** The engine's turn-end markers (`CEZ:DONE`, `CEZ:MONITORING` from #490) plus the in-band
@@ -304,7 +312,7 @@ function planFromTodos(input: unknown): PlanEntry[] | undefined {
   return entries
 }
 
-export function reduceThread(events: RunEvent[]): ThreadState {
+export function reduceThread(events: RunEvent[], options: ThreadReduceOptions = {}): ThreadState {
   const turns: DraftTurn[] = []
   /** stepId:itemId → live item. Runner sessions restart ids at `item_1`, while every current
    *  persisted event is stamped with its workflow step. Old recordings without a step id keep
@@ -317,9 +325,13 @@ export function reduceThread(events: RunEvent[]): ThreadState {
    *  parks `waiting` until the user answers). */
   let pendingAsk: ThreadAsk | undefined
 
-  const newTurn = (): DraftTurn => {
+  const newTurn = (sourceSeq?: number): DraftTurn => {
     turnSeq += 1
-    const turn: DraftTurn = { id: `turn-${turnSeq}`, entries: [], v2Items: false }
+    const turn: DraftTurn = {
+      id: sourceSeq === undefined ? `turn-fallback-${turnSeq}` : `turn-seq-${sourceSeq}`,
+      entries: [],
+      v2Items: false,
+    }
     turns.push(turn)
     return turn
   }
@@ -373,7 +385,7 @@ export function reduceThread(events: RunEvent[]): ThreadState {
           if (text !== '') pendingAsk.answer = text
           pendingAsk = undefined
         }
-        const turn = newTurn()
+        const turn = newTurn(event.seq)
         turn.userMessage = {
           text,
           imageCount: typeof event.imageCount === 'number' ? event.imageCount : 0,
@@ -390,7 +402,7 @@ export function reduceThread(events: RunEvent[]): ThreadState {
         if (current && current.turnId === undefined && !current.v2Items) {
           current.turnId = turnId
         } else {
-          newTurn().turnId = turnId
+          newTurn(event.seq).turnId = turnId
         }
         break
       }
@@ -666,9 +678,14 @@ export function reduceThread(events: RunEvent[]): ThreadState {
   }
 
   return {
-    turns: turns.map((draft) => {
+    turns: turns.map((draft, index) => {
       // The ask card renders the questions, so only then is the marker redundant (#473).
       const hasAskCard = draft.entries.some(({ entry }) => entry.kind === 'ask')
+      // A completed v2 assistant item lands before the v1 turn-end handler can
+      // parse the marker and emit ask.requested. Hide that provisional transport
+      // block only on the live latest turn. Once the run leaves `running`, a
+      // hard-invalid marker returns as readable fallback (#671).
+      const provisionalAsk = options.activeTurn === true && index === turns.length - 1
       return {
         id: draft.id,
         ...(draft.turnId !== undefined ? { turnId: draft.turnId } : {}),
@@ -677,7 +694,7 @@ export function reduceThread(events: RunEvent[]): ThreadState {
         ...(draft.completed !== undefined ? { completed: draft.completed } : {}),
         items: draft.entries.map(({ entry }) =>
           entry.kind === 'message' && entry.role === 'assistant'
-            ? { ...entry, text: stripDoneMarker(entry.text, hasAskCard) }
+            ? { ...entry, text: stripDoneMarker(entry.text, hasAskCard || provisionalAsk) }
             : entry,
         ),
       }

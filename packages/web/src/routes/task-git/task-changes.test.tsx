@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { ApiRun, ChangesPayload, HealthResponse } from '@open-mercato/cezar-api-client'
+import type { ApiRun, ChangesPayload, HealthResponse, RepoResponse } from '@open-mercato/cezar-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import type { GitActionBar } from '@/lib/git-actions'
 
@@ -46,7 +46,17 @@ const HEALTH: HealthResponse = {
   checks: [],
   defaultRunner: 'claude',
   forge: { kind: 'github', available: true },
-  capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: false, singleProject: false },
+  capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: false, singleProject: false, automations: false },
+}
+
+/** The PROJECT-scoped `/repo` answer. The remote that gates Push is read from here rather than
+ *  from `health.repo`, which describes the boot folder only (#791). */
+const REPO: RepoResponse = {
+  info: { root: '/repo', branch: 'main', remote: 'git@github.com:acme/demo.git' },
+  status: [],
+  log: [],
+  branches: ['main'],
+  baseBranch: null,
 }
 
 const CHANGES: ChangesPayload = {
@@ -96,6 +106,7 @@ function stubFetch(overrides: Record<string, () => Response> = {}): SentRequest[
       if (method === 'GET' && path === '/api/v1/runs/r1') return jsonResponse(RUN)
       if (method === 'GET' && path === '/api/v1/runs/r1/changes') return jsonResponse(CHANGES)
       if (method === 'GET' && path === '/api/v1/health') return jsonResponse(HEALTH)
+      if (method === 'GET' && path === '/api/v1/repo') return jsonResponse(REPO)
       if (method === 'GET' && path === '/api/v1/runs') return jsonResponse([])
       return jsonResponse({})
     }),
@@ -164,6 +175,27 @@ describe('the Changes tab route', () => {
     expect(document.querySelectorAll('[data-slot="tree-file"]')).toHaveLength(1)
   })
 
+  // The tree column is its OWN scroller. Sticky alone left a tree taller than the viewport
+  // growing the PAGE, so reaching its last file meant dragging the shared `main` scroller — and
+  // the diff with it — all the way down. jsdom lays nothing out, so the classes are all this can
+  // check; the real-layout proof (the pane overflows, and scrolling it leaves `main` where it
+  // was) lives in `e2e/diff-scroll.e2e.ts`.
+  it('gives the tree column its own bounded scroller, not the page’s', async () => {
+    stubFetch()
+    renderChangesRoute()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="changes-tree-pane"]')).not.toBeNull())
+    const pane = document.querySelector('[data-slot="changes-tree-pane"]') as HTMLElement
+    // Bounded by the room left under the sticky chrome — an unbounded pane cannot scroll at all.
+    expect(pane.className).toContain('max-h-[calc(100dvh_-_var(--diff-sticky-top)_-_1rem)]')
+    expect(pane.className).toContain('overflow-y-auto')
+    // …and a wheel that bottoms out inside the tree must not chain into the diff.
+    expect(pane.className).toContain('overscroll-contain')
+    // The cap is measured from the offset the pane is actually pinned at (`top-40` = 10rem).
+    expect(pane.className).toContain('sticky top-40')
+    expect(pane.parentElement?.className).toContain('[--diff-sticky-top:10rem]')
+  })
+
   it('shows the empty state when the worktree is clean', async () => {
     stubFetch({
       'GET /api/v1/runs/r1/changes': () => jsonResponse({ files: [], stat: { adds: 0, dels: 0, files: 0 } }),
@@ -177,7 +209,7 @@ describe('the Changes tab route', () => {
     expect(toolbarAction('commit')?.title).toContain('no changes to commit')
   })
 
-  it('explains when a repointed review worktree shows only uncommitted changes', async () => {
+  it('explains what a repointed review worktree is showing', async () => {
     stubFetch({
       'GET /api/v1/runs/r1/changes': () =>
         jsonResponse({
@@ -190,7 +222,7 @@ describe('the Changes tab route', () => {
 
     await waitFor(() => expect(document.querySelector('[data-slot="repointed-head-note"]')).not.toBeNull())
     expect(document.querySelector('[data-slot="repointed-head-note"]')?.textContent).toContain(
-      "HEAD is on review/pr-42, not this task's branch cez/abc12345 — showing uncommitted changes only.",
+      "HEAD is on review/pr-42, not this task's branch cez/abc12345 — showing only what this task changed there.",
     )
   })
 
@@ -264,6 +296,17 @@ describe('the Changes tab route', () => {
     await waitFor(() =>
       expect(document.body.textContent).toContain('Pushed cez/abc12345 to origin (upstream set)'),
     )
+  })
+
+  // #791: `/api/v1/health` reports the boot folder, so a cezar booted outside a git repo answered
+  // `repo: null` and Push went dark for every project. The remote must come from the
+  // project-scoped `/repo` instead.
+  it('offers Push from the project remote even when the boot folder has no git repo', async () => {
+    stubFetch({
+      'GET /api/v1/health': () => jsonResponse({ ...HEALTH, repo: null }),
+    })
+    renderChangesRoute()
+    await waitFor(() => expect(toolbarAction('push')?.disabled).toBe(false))
   })
 
   it('Create PR uses the existing /pr flow and flips to View PR once the record carries the URL', async () => {

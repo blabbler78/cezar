@@ -6,6 +6,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { createQueryClient } from '@/api/query-client'
 import { workspaceQueryKeys } from '@/api/queries'
 import type {
+  AgentProfilesResponse,
   ConfigResponse,
   HealthResponse,
   ProviderStatusResponse,
@@ -63,7 +64,7 @@ const HEALTH: HealthResponse = {
     { name: 'git', available: true, version: '2.43.0' },
   ],
   forge: null,
-  capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: true, singleProject: false },
+  capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: true, singleProject: false, automations: false },
 }
 
 const HEALTH_MULTI: HealthResponse = {
@@ -152,6 +153,7 @@ const CONFIG: ConfigResponse = {
 }
 
 const WORKSPACE_CONFIG: WorkspaceConfigResponse = {
+  agentDefaults: {},
   browseRoot: '~/',
   projectsDir: '~/cezar/projects',
   skillsAutoUpdate: null,
@@ -166,6 +168,7 @@ const WORKSPACE_CONFIG: WorkspaceConfigResponse = {
     maxParallel: 2,
     maxMonitoringSessions: 2,
     monitoringWakeIntervalMinutes: null,
+    autoResumeOnUsageLimit: true,
     memoryLimitMb: null,
     worktreeRetentionDefault: 10,
   },
@@ -230,6 +233,9 @@ function serve(overrides: {
   plan?: unknown | (() => Promise<Response>)
   /** `POST /api/v1/workflows` — answers in call order (409-then-201 for the overwrite flow). */
   saveWorkflow?: Array<{ status: number; body: unknown }>
+  /** Agent accounts (spec 2026-07-29-agent-profiles). Omitted answers a 404, which is how every
+   *  pre-existing test here keeps a composer with no account pill at all. */
+  agentProfiles?: AgentProfilesResponse
 } = {}) {
   const data = {
     health: HEALTH,
@@ -291,6 +297,9 @@ function serve(overrides: {
       if (url === '/api/v1/config' && method === 'PUT')
         return json({ baseBranch: (body as { baseBranch: string | null }).baseBranch, defaultRunner: 'claude' })
       if (url === '/api/v1/workspace/config' && method === 'GET') return json(data.workspaceConfig)
+      if (url === '/api/v1/workspace/agent-profiles' && method === 'GET' && data.agentProfiles) {
+        return json(data.agentProfiles)
+      }
       return json({ error: `unmocked ${method} ${url}` }, 404)
     }),
   )
@@ -323,8 +332,15 @@ const textarea = () => screen.getByLabelText('Describe a task for the agent') as
 const sourcePill = () => screen.getByRole('button', { name: 'Choose a skill or workflow' })
 const location = () => screen.getByTestId('location').textContent
 
-/** The pickers resolve once workflows+skills+ui-state answered — wait for the real label. */
-async function pillReady(label = 'quick-task') {
+/** Seed the composer draft with a picked source — the ONLY thing that preselects one now.
+ *  The persisted `lastTask` deliberately no longer does (see `resolveSource`), which is what
+ *  keeps a skill from following the user into every task after the one they picked it for. */
+const draftSource = (source: { source: 'skill' | 'workflow'; ref: string }) =>
+  writeDraft({ ...readDraft(), source })
+
+/** The pickers resolve once workflows+skills+ui-state answered — wait for the real label.
+ *  The default is the EMPTY source pill: `/new` opens with no skill and no workflow picked. */
+async function pillReady(label = 'Skill') {
   await waitFor(() => {
     expect(sourcePill().textContent).toContain(label)
     expect(textarea().disabled).toBe(false)
@@ -347,6 +363,9 @@ describe('the hero surface', () => {
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('What should the agent work on?')
     expect(screen.getByText('Runs in an isolated worktree — review everything before it lands.')).toBeTruthy()
     expect(document.querySelector('[data-route="new"] [data-slot="twinkle-backdrop"]')).not.toBeNull()
+    // Asserted here for the DEFAULT run mode only. #793: this line used to be printed
+    // unconditionally, so it also claimed isolation for runs that had opted out of it — the
+    // per-state cases live in "the run-mode note" below.
     await pillReady()
     // ⌘N drops you here to type — after the provider check enables the composer, the caret
     // must land in the box without the user clicking it.
@@ -403,10 +422,12 @@ describe('picker data flows', () => {
     // …the model reset to auto and the presets are codex's now.
     expect((document.querySelector('[data-slot="model-pill"]') as HTMLElement).textContent).toContain('auto')
     fireEvent.pointerDown(document.querySelector('[data-slot="model-pill"]') as HTMLElement)
-    options = await screen.findAllByRole('menuitemradio')
-    const labels = options.map((o) => o.textContent ?? '')
-    expect(labels.some((l) => l.includes('gpt-future'))).toBe(true)
-    expect(labels.some((l) => l.includes('opus'))).toBe(false)
+    // codex's catalog is fetched for the runner now SELECTED (#794), so it lands after the switch.
+    await waitFor(() => {
+      const labels = screen.getAllByRole('menuitemradio').map((o) => o.textContent ?? '')
+      expect(labels.some((l) => l.includes('gpt-future'))).toBe(true)
+      expect(labels.some((l) => l.includes('opus'))).toBe(false)
+    })
   })
 
   it('excludes disconnected providers from the runner choices even when health detects them', async () => {
@@ -444,7 +465,7 @@ describe('picker data flows', () => {
 
   it('drops a persisted model preset that belongs to another runner', async () => {
     writeDraft({
-      text: '', source: null, runner: 'codex', model: 'claude-opus-4-8', variants: 1,
+      text: '', source: null, runner: 'codex', agentProfile: null, model: 'claude-opus-4-8', variants: 1,
       planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
     })
     serve({ health: HEALTH_MULTI, providerStatus: PROVIDERS_MULTI })
@@ -458,6 +479,49 @@ describe('picker data flows', () => {
     expect(options.some((option) => option.textContent?.includes('claude-opus-4-8'))).toBe(false)
   })
 
+  describe('the run-mode note (#793)', () => {
+    const note = () => document.querySelector('[data-slot="run-mode-note"]')?.textContent
+
+    it('promises isolation only while the run will actually get a worktree', async () => {
+      serve()
+      renderNewTask()
+      await pillReady()
+      expect(note()).toBe('Runs in an isolated worktree — review everything before it lands.')
+
+      // Unchecking the chip changes where the work lands, so it has to change what the header
+      // says. This is the regression: the line was printed unconditionally, so it kept promising
+      // isolation for a run that was about to edit the user's checkout directly.
+      fireEvent.click(document.querySelector('[data-slot="worktree-toggle"]') as HTMLButtonElement)
+      await waitFor(() => expect(note())
+        .toBe('Runs in the repo working tree — your checkout is modified directly.'))
+    })
+
+    it('explains a non-git folder rather than warning about a checkout', async () => {
+      // There is no worktree to opt into here, so "your checkout is modified directly" would be
+      // the wrong half of the truth — the user needs to know WHY there is no isolation on offer.
+      serve({ health: HEALTH_NO_GIT, repo: REPO_NO_GIT })
+      renderNewTask()
+      await pillReady()
+      expect(note())
+        .toBe('Runs in place — no git repository detected, so there is no worktree to isolate in.')
+    })
+
+    it('follows the workspace Worktree-off policy, not just an explicit click', async () => {
+      // The resolved mode, not the draft: a run can land in the checkout because policy said so,
+      // and the header has to be honest about that too.
+      serve({
+        workspaceConfig: {
+          ...WORKSPACE_CONFIG,
+          composerDefaults: { ...WORKSPACE_CONFIG.composerDefaults!, inheritedWorktree: false },
+        },
+      })
+      renderNewTask()
+      await pillReady()
+      await waitFor(() => expect(note())
+        .toBe('Runs in the repo working tree — your checkout is modified directly.'))
+    })
+  })
+
   it('gates variants on git: no repo → pill disabled with the honest reason, base pill gone', async () => {
     serve({ health: HEALTH_NO_GIT, repo: REPO_NO_GIT })
     renderNewTask()
@@ -466,6 +530,23 @@ describe('picker data flows', () => {
     expect(pill.disabled).toBe(true)
     expect(pill.title).toContain('need a git repository')
     expect(document.querySelector('[data-slot="base-pill"]')).toBeNull()
+  })
+
+  // #791: health is bound to the boot folder, so a cezar booted outside a git repo answered
+  // `repo: null` for EVERY project. Reading git state from the project-scoped `/repo` instead is
+  // what keeps the worktree controls alive for a git project under a non-git boot root.
+  it('gates variants on the project repo, not the boot folder: boot without git still offers worktrees', async () => {
+    serve({ health: HEALTH_NO_GIT, repo: REPO })
+    renderNewTask()
+    await pillReady()
+    const pill = document.querySelector('[data-slot="variants-pill"]') as HTMLButtonElement
+    expect(pill.disabled).toBe(false)
+    expect(document.querySelector('[data-slot="worktree-toggle"]')).not.toBeNull()
+    fireEvent.change(textarea(), { target: { value: 'Fix the composer git detection' } })
+    await startTask()
+    // `worktree` is sent only when explicitly OFF (new-task-form.ts): an absent key IS the
+    // isolated-worktree default, so absence — not `worktree: false` — is what the fix restores.
+    expect(postedBody()).not.toHaveProperty('worktree')
   })
 
   it('base branch pill shows config default (falling back to the checkout) and PUTs /api/v1/config', async () => {
@@ -493,16 +574,30 @@ describe('picker data flows', () => {
     })
   })
 
-  it('preselects the persisted lastTask when it still exists', async () => {
-    serve({ uiState: { lastTask: { source: 'workflow', ref: 'fix-and-verify' } } })
+  it('opens with NOTHING picked, whatever the last run used', async () => {
+    // The report this fixes: a skill picked once sat in the pill for every task afterwards,
+    // and the composer offered no way to take it out. `lastTask` is still recorded — it just
+    // no longer decides what the next task runs.
+    serve({ uiState: { lastTask: { source: 'skill', ref: 'om-fix' } } })
     renderNewTask()
-    await pillReady('fix-and-verify')
+    await pillReady()
+    expect(sourcePill().getAttribute('data-source-kind')).toBe('none')
+    expect(sourcePill().textContent).not.toContain('om-fix')
   })
 
-  it('falls back to quick-task when lastTask names something gone', async () => {
-    serve({ uiState: { lastTask: { source: 'skill', ref: 'deleted-skill' } } })
+  it('preselects the draft pick, and drops it when the catalog no longer has it', async () => {
+    draftSource({ source: 'workflow', ref: 'fix-and-verify' })
+    serve()
     renderNewTask()
-    await pillReady('quick-task')
+    await pillReady('fix-and-verify')
+
+    cleanup()
+    resetDraft()
+    draftSource({ source: 'skill', ref: 'deleted-skill' })
+    serve()
+    renderNewTask()
+    await pillReady()
+    expect(sourcePill().getAttribute('data-source-kind')).toBe('none')
   })
 
   it('the source menu groups: Project skills (bold), Workflows, Global last', async () => {
@@ -513,9 +608,14 @@ describe('picker data flows', () => {
     await screen.findByPlaceholderText('search skills & workflows…')
 
     const options = [...document.querySelectorAll('[data-slot="source-option"]')]
-    expect(options.map((o) => o.getAttribute('data-source-ref'))).toEqual([
-      'om-fix', 'quick-task', 'fix-and-verify', 'deploy',
+    // "No skill" leads, heading-less; `quick-task` is NOT a row of its own — that row is it.
+    expect(options.map((o) => o.getAttribute('data-source-kind'))).toEqual([
+      'none', 'skill', 'workflow', 'skill',
     ])
+    expect(options.map((o) => o.getAttribute('data-source-ref'))).toEqual([
+      null, 'om-fix', 'fix-and-verify', 'deploy',
+    ])
+    expect(options[0]!.textContent).toContain('No skill')
     const headings = [...document.querySelectorAll('[cmdk-group-heading]')].map((h) => h.textContent)
     expect(headings).toEqual(['Project skills', 'Workflows', 'Global'])
   })
@@ -552,6 +652,121 @@ describe('picker data flows', () => {
   })
 })
 
+// ---- clearing the source (the reported bug: no way to deselect a skill) -----------------------
+
+describe('clearing the picked skill or workflow', () => {
+  const clearButton = () => document.querySelector<HTMLButtonElement>('[data-slot="source-pill-clear"]')
+  const openMenu = async () => {
+    fireEvent.click(sourcePill())
+    await screen.findByPlaceholderText('search skills & workflows…')
+  }
+  const option = (kind: string, ref?: string) =>
+    document.querySelector<HTMLElement>(
+      ref === undefined
+        ? `[data-slot="source-option"][data-source-kind="${kind}"]`
+        : `[data-slot="source-option"][data-source-kind="${kind}"][data-source-ref="${ref}"]`,
+    )
+
+  it('the ✕ clears in one click, without opening the menu', async () => {
+    draftSource({ source: 'skill', ref: 'om-fix' })
+    serve()
+    renderNewTask()
+    await pillReady('om-fix')
+
+    expect(clearButton()?.getAttribute('aria-label')).toBe('Clear the skill om-fix')
+    fireEvent.click(clearButton()!)
+
+    await waitFor(() => expect(sourcePill().getAttribute('data-source-kind')).toBe('none'))
+    // No menu was ever opened — the whole point of the affordance.
+    expect(screen.queryByPlaceholderText('search skills & workflows…')).toBeNull()
+    // And the run really does go out as the plain built-in.
+    fireEvent.change(textarea(), { target: { value: 'Ship it plain' } })
+    await startTask()
+    expect(postedBody()).toEqual({ task: 'Ship it plain', workflow: 'quick-task' })
+  })
+
+  it('offers no ✕ while nothing is picked — there is nothing to clear', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    expect(clearButton()).toBeNull()
+  })
+
+  it('Backspace on the focused pill clears it, like a token in a tag field', async () => {
+    draftSource({ source: 'workflow', ref: 'fix-and-verify' })
+    serve()
+    renderNewTask()
+    await pillReady('fix-and-verify')
+
+    fireEvent.keyDown(sourcePill(), { key: 'Backspace' })
+    await waitFor(() => expect(sourcePill().getAttribute('data-source-kind')).toBe('none'))
+  })
+
+  it('leaves the pill alone on ⌘/Ctrl+Backspace — that is a text gesture, not a picker one', async () => {
+    draftSource({ source: 'skill', ref: 'om-fix' })
+    serve()
+    renderNewTask()
+    await pillReady('om-fix')
+
+    fireEvent.keyDown(sourcePill(), { key: 'Backspace', metaKey: true })
+    expect(sourcePill().getAttribute('data-source-kind')).toBe('skill')
+  })
+
+  it('picking the SELECTED row again clears it — for a skill and for a workflow', async () => {
+    draftSource({ source: 'skill', ref: 'om-fix' })
+    serve()
+    renderNewTask()
+    await pillReady('om-fix')
+
+    await openMenu()
+    fireEvent.click(option('skill', 'om-fix')!)
+    await waitFor(() => expect(sourcePill().getAttribute('data-source-kind')).toBe('none'))
+
+    await openMenu()
+    fireEvent.click(option('workflow', 'fix-and-verify')!)
+    await waitFor(() => expect(sourcePill().textContent).toContain('fix-and-verify'))
+    await openMenu()
+    fireEvent.click(option('workflow', 'fix-and-verify')!)
+    await waitFor(() => expect(sourcePill().getAttribute('data-source-kind')).toBe('none'))
+  })
+
+  it('the "No skill" row clears the picker, and answers to a search for quick-task', async () => {
+    draftSource({ source: 'skill', ref: 'om-fix' })
+    serve()
+    renderNewTask()
+    await pillReady('om-fix')
+
+    await openMenu()
+    const input = screen.getByPlaceholderText('search skills & workflows…')
+    // The built-in has no row of its own any more — typing its name finds the row that runs it.
+    fireEvent.change(input, { target: { value: 'quick' } })
+    await waitFor(() => {
+      const visible = [...document.querySelectorAll('[data-slot="source-option"]')]
+      expect(visible.map((o) => o.getAttribute('data-source-kind'))).toEqual(['none'])
+    })
+
+    fireEvent.click(option('none')!)
+    await waitFor(() => expect(sourcePill().getAttribute('data-source-kind')).toBe('none'))
+  })
+
+  it('a cleared pill stays cleared for the NEXT task, and the started one is not remembered', async () => {
+    draftSource({ source: 'skill', ref: 'om-fix' })
+    serve({ createRun: { id: 'run-2' } })
+    renderNewTask()
+    await pillReady('om-fix')
+    fireEvent.change(textarea(), { target: { value: 'Fix it with the skill' } })
+    await startTask()
+    await waitFor(() => expect(location()).toBe('/tasks/run-2'))
+
+    // Same browser, same project, next visit: the skill went with the task it ran.
+    cleanup()
+    serve()
+    renderNewTask()
+    await pillReady()
+    expect(sourcePill().getAttribute('data-source-kind')).toBe('none')
+  })
+})
+
 // ---- provider authentication gate -------------------------------------------------------------
 
 describe('provider authentication gate', () => {
@@ -565,7 +780,7 @@ describe('provider authentication gate', () => {
     })
     renderNewTask()
 
-    await waitFor(() => expect(sourcePill().textContent).toContain('quick-task'))
+    await waitFor(() => expect(sourcePill().textContent).toContain('Skill'))
     expect(textarea().disabled).toBe(true)
     expect(textarea().placeholder).toBe('Checking agent providers…')
     expect(screen.queryByRole('link', { name: 'Configure providers' })).toBeNull()
@@ -701,10 +916,8 @@ describe('provider authentication gate', () => {
 
 describe('submit', () => {
   it('a SKILL source posts the one-step inline chain and persists lastTask, then navigates', async () => {
-    serve({
-      createRun: { id: 'run-9' },
-      uiState: { lastTask: { source: 'skill', ref: 'om-fix' } },
-    })
+    draftSource({ source: 'skill', ref: 'om-fix' })
+    serve({ createRun: { id: 'run-9' } })
     renderNewTask()
     await pillReady('om-fix')
     fireEvent.change(textarea(), { target: { value: 'Fix the flaky worktree test' } })
@@ -737,7 +950,7 @@ describe('submit', () => {
     // 404, not a 5xx: the query client never retries a 4xx (query-client.ts), so the query
     // lands in its errored state immediately and the test stays deterministic.
     writeDraft({
-      text: '', source: { source: 'skill', ref: 'om-fix' }, runner: null, model: null,
+      text: '', source: { source: 'skill', ref: 'om-fix' }, runner: null, agentProfile: null, model: null,
       variants: 1, planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
     })
     serve({ createRun: { id: 'run-9' }, uiStateStatus: 404 })
@@ -753,33 +966,56 @@ describe('submit', () => {
   })
 
   it('a WORKFLOW source posts { workflow, task }', async () => {
-    serve({ uiState: { lastTask: { source: 'workflow', ref: 'quick-task' } } })
+    draftSource({ source: 'workflow', ref: 'fix-and-verify' })
+    serve()
     renderNewTask()
-    await pillReady('quick-task')
+    await pillReady('fix-and-verify')
+    fireEvent.change(textarea(), { target: { value: 'Ship it' } })
+    await startTask()
+
+    expect(postedBody()).toEqual({ task: 'Ship it', workflow: 'fix-and-verify' })
+  })
+
+  it('NO source posts the plain quick-task, records lastTask:null and no recency entry', async () => {
+    serve({ createRun: { id: 'run-plain' } })
+    renderNewTask()
+    await pillReady()
     fireEvent.change(textarea(), { target: { value: 'Ship it' } })
     await startTask()
 
     expect(postedBody()).toEqual({ task: 'Ship it', workflow: 'quick-task' })
+    await waitFor(() =>
+      expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/v1/ui-state')?.body).toEqual({
+        // An honest record of a run that picked nothing — and the value that stops an older
+        // cockpit restoring a stale skill from this same file.
+        lastTask: null,
+        // Nothing was picked, so nothing joins the recency list or the frequency map.
+        lastGenerateFollowups: true,
+      }),
+    )
   })
 
   it('posts worktree:false after opt-out for every single-step source shape', async () => {
     const cases: Array<{
       label: string
+      source?: { source: 'skill' | 'workflow'; ref: string }
       overrides: NonNullable<Parameters<typeof serve>[0]>
       expected: Record<string, unknown>
     }> = [
       {
-        label: 'quick-task',
+        label: 'Skill',
         overrides: {},
         expected: { workflow: 'quick-task' },
       },
       {
         label: 'om-fix',
-        overrides: { uiState: { lastTask: { source: 'skill', ref: 'om-fix' } } },
+        source: { source: 'skill', ref: 'om-fix' },
+        overrides: {},
         expected: { steps: [{ id: 'task', name: 'om-fix', skill: 'om-fix', prompt: '{{task}}' }] },
       },
       {
         label: 'one-step',
+        source: { source: 'workflow', ref: 'one-step' },
         overrides: {
           workflows: {
             workflows: [
@@ -788,7 +1024,6 @@ describe('submit', () => {
             ],
             issues: [],
           },
-          uiState: { lastTask: { source: 'workflow', ref: 'one-step' } },
         },
         expected: { workflow: 'one-step' },
       },
@@ -797,6 +1032,7 @@ describe('submit', () => {
     for (const testCase of cases) {
       cleanup()
       resetDraft()
+      if (testCase.source) draftSource(testCase.source)
       serve(testCase.overrides)
       renderNewTask()
       await pillReady(testCase.label)
@@ -958,12 +1194,10 @@ describe('submit', () => {
   })
 
   it('applies an interactive skill hint to untouched controls while keeping both overridable', async () => {
-    // The cold default is now quick-task, so an interactive skill only drives the recommendation
-    // once it is the selected source — here via the persisted lastTask.
-    serve({
-      skills: [{ ...SKILLS[0]!, interactive: true }, SKILLS[1]!],
-      uiState: { lastTask: { source: 'skill', ref: 'om-fix' } },
-    })
+    // The composer opens on no source, so an interactive skill only drives the recommendation
+    // once it is the selected one — here from the draft.
+    draftSource({ source: 'skill', ref: 'om-fix' })
+    serve({ skills: [{ ...SKILLS[0]!, interactive: true }, SKILLS[1]!] })
     renderNewTask()
     await pillReady('om-fix')
 
@@ -982,6 +1216,7 @@ describe('submit', () => {
   })
 
   it('lets a multi-step workflow opt out and submits worktree:false', async () => {
+    draftSource({ source: 'workflow', ref: 'fix-and-verify' })
     serve({
       workflows: {
         workflows: [
@@ -997,7 +1232,6 @@ describe('submit', () => {
         ],
         issues: [],
       },
-      uiState: { lastTask: { source: 'workflow', ref: 'fix-and-verify' } },
     })
     renderNewTask()
     await pillReady('fix-and-verify')
@@ -1014,7 +1248,7 @@ describe('submit', () => {
   // #471 — the composer must not offer a switch the server overrides anyway.
   const inboxOffHealth: HealthResponse = {
     ...HEALTH,
-    capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: false, singleProject: false },
+    capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: false, singleProject: false, automations: false },
   }
   const followupsToggle = () =>
     document.querySelector('[data-slot="generate-followups-toggle"]')
@@ -1370,7 +1604,9 @@ describe('bookmarklet auto-start', () => {
     await screen.findByText('Unknown skill "ghost" — prefilled for quick-task; review and press Start')
     // Legacy initFromQuery verbatim: the intent goes into the text, quick-task resolves it.
     expect(textarea().value).toBe('Use the "ghost" skill on: hello')
-    await pillReady('quick-task')
+    // "quick-task" IS the empty picker now — the prefill lands on it by picking nothing.
+    await pillReady()
+    expect(sourcePill().getAttribute('data-source-kind')).toBe('none')
     expect(runsPosted()).toHaveLength(0)
   })
 
@@ -1808,8 +2044,8 @@ describe('prompt templates on the new-task composer', () => {
     renderNewTask()
     await pillReady()
 
-    await pickSource('quick-task')
-    await waitFor(() => expect(sourcePill().textContent).toContain('quick-task'))
+    await pickSource('fix-and-verify')
+    await waitFor(() => expect(sourcePill().textContent).toContain('fix-and-verify'))
     expect(textarea().value).toBe('')
   })
 
@@ -1827,5 +2063,190 @@ describe('prompt templates on the new-task composer', () => {
       task: 'Follow the fix rules.',
       steps: [{ id: 'task', name: 'om-fix', skill: 'om-fix', prompt: '{{task}}' }],
     })
+  })
+})
+
+// ---- agent accounts (spec 2026-07-29-agent-profiles) ------------------------------------------
+
+/** One extra Claude login beside the discovered defaults. */
+const ACCOUNTS: AgentProfilesResponse = {
+  defaults: {},
+  editable: true,
+  profileCapableProviders: ['claude', 'codex'],
+  selections: {},
+  profiles: [
+    {
+      id: 'default',
+      provider: 'claude',
+      label: 'Default',
+      configDir: '/home/u/.claude',
+      path: '/home/u/.claude',
+      exists: true,
+      looksValid: true,
+      isDefault: true,
+      status: { provider: 'claude', status: 'connected' },
+      files: [],
+    },
+    {
+      id: 'klaudiusz',
+      provider: 'claude',
+      label: 'Klaudiusz',
+      configDir: '~/.claude-klaudiusz',
+      path: '/home/u/.claude-klaudiusz',
+      exists: true,
+      looksValid: true,
+      isDefault: false,
+      status: { provider: 'claude', status: 'connected', profileId: 'work' },
+      files: [],
+    },
+  ],
+}
+
+/** The one pill that now carries both: which agent, and which of that agent's logins. */
+const runnerPill = () => document.querySelector('[data-slot="runner-pill"]') as HTMLElement | null
+
+/** Open a PickerPill and click the option whose label contains `match`. */
+const pickFrom = async (pill: HTMLElement, match: string) => {
+  fireEvent.pointerDown(pill)
+  const options = await screen.findAllByRole('menuitemradio')
+  fireEvent.click(options.find((o) => o.textContent?.includes(match)) as HTMLElement)
+}
+
+/**
+ * The account lives INSIDE the runner pill (spec 2026-07-29-agent-profiles): "which agent" and
+ * "which of my logins for that agent" are one decision, and the composer row already carries six
+ * pills. The account defaults to whatever the repo is set to and is overridable per task.
+ */
+describe('the composer runner pill carries the account', () => {
+  it('adds nothing when no second login exists — the zero-config composer is unchanged', async () => {
+    serve({
+      agentProfiles: { ...ACCOUNTS, profiles: ACCOUNTS.profiles.filter((p: (typeof ACCOUNTS)['profiles'][number]) => p.isDefault) },
+    })
+    renderNewTask()
+    await pillReady()
+    // Settled: the model pill (rendered unconditionally beside it) is up, so this is not a race.
+    await waitFor(() => expect(document.querySelector('[data-slot="model-pill"]')).not.toBeNull())
+    // One runner and no accounts leaves nothing to choose, so the pill stays away entirely.
+    expect(runnerPill()).toBeNull()
+    expect(document.querySelector('[data-slot="account-pill"]')).toBeNull()
+  })
+
+  it('lists every agent-and-login as ONE flat row, on a single-runner host too', async () => {
+    // Two regressions in one: folding the account into the runner pill must not hide it on a
+    // claude-only machine (where the pill never used to render), and the list must be flat —
+    // one row per thing that can run the task, not a runner choice with an account choice nested
+    // under it.
+    serve({ agentProfiles: ACCOUNTS })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    fireEvent.pointerDown(runnerPill()!)
+    const options = await screen.findAllByRole('menuitemradio')
+    expect(options.map((o) => o.textContent?.replace(/\s+/g, ' '))).toEqual([
+      'claude · Default/home/u/.claude'.replace(/\s+/g, ' '),
+      'claude · Klaudiusz~/.claude-klaudiusz'.replace(/\s+/g, ' '),
+    ])
+    // Each row names its folder: the labels are cezar's invention, the folder is the account.
+    expect(options[1]?.textContent).toContain('~/.claude-klaudiusz')
+  })
+
+  it('starts on the account the repo is set to, without the user picking anything', async () => {
+    serve({
+      agentProfiles: { ...ACCOUNTS, selections: { '/repo': { claude: 'klaudiusz' } } },
+    })
+    renderNewTask()
+    await pillReady()
+    // The repo's choice IS the initial selection — no "repo default" abstraction to decode.
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Klaudiusz'))
+
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    // …and an untouched pill still sends nothing, so the repo stays in charge.
+    expect(postedBody()).not.toHaveProperty('agentProfile')
+  })
+
+  it('sends `default` explicitly when the repo points elsewhere — not an absent key', async () => {
+    // The one case where "follow the repo" and "the discovered account" differ. An absent key would
+    // run the task on Klaudiusz, which is the opposite of what picking `claude · Default` says.
+    serve({
+      agentProfiles: { ...ACCOUNTS, selections: { '/repo': { claude: 'klaudiusz' } } },
+    })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Klaudiusz'))
+
+    await pickFrom(runnerPill()!, 'Default')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Default'))
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+
+    expect(postedBody()).toMatchObject({ agentProfile: 'default' })
+  })
+
+  it('sends the picked account on the wire', async () => {
+    serve({ agentProfiles: ACCOUNTS })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    // The pill says which login the task will really use, not just which agent.
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Klaudiusz'))
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+
+    expect(postedBody()).toMatchObject({ agentProfile: 'klaudiusz' })
+  })
+
+  it('sends NOTHING when the repo default is left alone', async () => {
+    serve({ agentProfiles: ACCOUNTS })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    // An absent key means "follow the repo", which is what an untouched control means.
+    expect(postedBody()).not.toHaveProperty('agentProfile')
+  })
+
+  it('switches back to the discovered account after picking another', async () => {
+    serve({ agentProfiles: ACCOUNTS })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Klaudiusz'))
+    await pickFrom(runnerPill()!, 'Default')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Default'))
+
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    // This repo has no selection of its own, so `default` and "follow the repo" agree — but the
+    // pick was explicit, and saying so keeps it true if the repo setting changes before it starts.
+    expect(postedBody()).toMatchObject({ agentProfile: 'default' })
+  })
+
+  it('drops an account belonging to another runner when the runner switches', async () => {
+    // A Claude account must not ride along into a codex run: the id means nothing there, and
+    // sending it would assert a choice the user never made for that engine.
+    serve({ agentProfiles: ACCOUNTS, health: HEALTH_MULTI, providerStatus: PROVIDERS_MULTI })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('Klaudiusz'))
+
+    await pickFrom(runnerPill()!, 'codex')
+
+    // Codex has no second login, so the account group goes away and the pill is a runner again…
+    await waitFor(() => expect(runnerPill()?.textContent?.trim()).toBe('codex'))
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    // …and nothing account-shaped reaches the wire.
+    expect(postedBody()).not.toHaveProperty('agentProfile')
   })
 })

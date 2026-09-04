@@ -1,5 +1,16 @@
 import type {
   AgentConfigFileContent,
+  AgentAccountDetailsResponse,
+  AgentAccountStatusResponse,
+  AgentProfileResponse,
+  AgentProfileSelectionsResponse,
+  AgentProfilesResponse,
+  CreateAgentProfileInput,
+  OpenAgentAccountFileInput,
+  OpenAgentAccountFileResponse,
+  RemoveAgentProfileResponse,
+  SelectAgentProfileInput,
+  UpdateAgentProfileInput,
   AutomationsResponse,
   AutomationCheck,
   AutomationCheckQueuedResponse,
@@ -10,6 +21,8 @@ import type {
   AgentConfigListing,
   ApiRun,
   ArchiveFinishedResponse,
+  MarkAllReadResponse,
+  CancelAutoResumeResponse,
   CancelResponse,
   ChangesPayload,
   CheckoutProjectInput,
@@ -28,6 +41,7 @@ import type {
   GitCommitResponse,
   GitPushResponse,
   GithubChecksData,
+  GithubRefStatusData,
   GithubCommentsData,
   GithubData,
   GithubMergeMethod,
@@ -36,13 +50,14 @@ import type {
   GithubPrChangesData,
   GroupResponse,
   HealthResponse,
-  ImageInput,
+  AttachmentInput,
   LaunchKeyResponse,
   MessageInput,
   EditQueuedMessageResponse,
   MessageResponse,
   RemoveQueuedMessageResponse,
   OpenInCliResponse,
+  OpenProjectInResponse,
   OpenTargetsResponse,
   ParsedWorkflow,
   PatchRunInput,
@@ -60,10 +75,14 @@ import type {
   RepoBranchResponse,
   RepoCommitPayload,
   RunCommitsResponse,
+  RunHistoryContext,
+  RunHistoryPage,
   RepoResponse,
   Runner,
+  ModelDiscoveryRunner,
   RunnerModelCatalogResponse,
   RunRecord,
+  RunsIndexResponse,
   WorktreeEntry,
   SaveWorkflowInput,
   SaveWorkflowResponse,
@@ -71,6 +90,7 @@ import type {
   SetConfigResponse,
   SetAgentConfigInput,
   SetWorkspaceConfigInput,
+  SetWorkspaceUiStateInput,
   ImportableSkill,
   Skill,
   StartTodoResponse,
@@ -89,6 +109,8 @@ import {
   getApiBaseUrl,
   getApiScope,
   queryScope,
+  runHistoryContextSchema,
+  runHistoryPageSchema,
 } from '@open-mercato/cezar-api-client'
 import type { Ok, OkJson } from '@open-mercato/cezar-api-client'
 import type { ClientResponse } from 'hono/client'
@@ -279,6 +301,45 @@ async function unwrap<R extends ClientResponse<unknown, number, ResponseFormat>>
 }
 
 /**
+ * The `safeParse` half of a contract schema, spelled structurally.
+ *
+ * Keeps this package free of a direct `zod` dependency: the schemas arrive through the
+ * api-client barrel as runtime values (`contract-pipeline.test.ts` pins that), and this is the
+ * only part of them `unwrapValidated` uses.
+ */
+type ResponseValidator<T> = {
+  safeParse: (value: unknown) => { success: true; data: T } | { success: false }
+}
+
+/**
+ * `unwrap`, plus the shape check its cast cannot make.
+ *
+ * `unwrap` ends in `parsed as OkJson<R>` — a compile-time claim about a body the server sent at
+ * runtime. For most routes the claim is harmless: a caller reading a missing field gets
+ * `undefined` and renders nothing. The history routes are different — `useRunHistory` iterates
+ * `page.events`, so a 200 whose body is not a page throws a `TypeError` mid-render and takes the
+ * session view down with it, bypassing the hook's own full-replay fallback (which only triggers
+ * on a REJECTED query). Validating here turns that body into the same `ApiError` a non-JSON body
+ * already produces, so the malformed case degrades exactly like the unreachable one.
+ *
+ * Its own server cannot produce such a body (`contract-parity.test.ts` pins both response types
+ * to these schemas) — this guards the boundary against a proxy, a stale server, or a stub.
+ */
+async function unwrapValidated<R extends ClientResponse<unknown, number, ResponseFormat>>(
+  res: R,
+  label: string,
+  schema: ResponseValidator<OkJson<R>>,
+): Promise<OkJson<R>> {
+  const status = res.status
+  const parsed = await unwrap(res, label)
+  const result = schema.safeParse(parsed)
+  if (!result.success) {
+    throw new ApiError(status, `the cezar server answered ${label} with an unexpected body`)
+  }
+  return result.data
+}
+
+/**
  * The one `fetch` both request paths go through — hand-written and typed alike.
  *
  * Shared rather than duplicated because the two behaviours below are the contract, and a
@@ -334,9 +395,13 @@ export async function getHealth(opts?: ReadOptions): Promise<HealthResponse> {
   return unwrap(await cez.api.v1.health.$get({}, init(opts)), '/health')
 }
 
-/** Host-local Codex catalog. Workspace-level: one CLI/account serves every project. */
-export async function getRunnerModels(opts?: ReadOptions): Promise<RunnerModelCatalogResponse> {
-  return unwrap(await cez.api.v1.models.$get({ query: { runner: 'codex' } }, init(opts)), '/models')
+/** Host-local catalog for one discovery runner (`codex`, `opencode` — #794). Workspace-level:
+ *  one CLI/account serves every project. */
+export async function getRunnerModels(
+  runner: ModelDiscoveryRunner,
+  opts?: ReadOptions,
+): Promise<RunnerModelCatalogResponse> {
+  return unwrap(await cez.api.v1.models.$get({ query: { runner } }, init(opts)), '/models')
 }
 
 /** Host-local authentication state shared by every project. */
@@ -380,12 +445,28 @@ export async function getProjects(opts?: ReadOptions): Promise<ProjectsResponse>
 /** One directory listing for the folder picker (`GET /api/fs/browse`, step 4.1). `path`
  *  omitted means the independently configured browse root, so the dialog never has to know
  *  or duplicate that workspace setting. */
-export async function browseFs(path?: string, opts?: ReadOptions): Promise<FsBrowseResponse> {
+export async function browseFs(
+  path?: string,
+  opts?: ReadOptions & {
+    /** Include dot-directories. Off by default (project folders are not hidden); ON for the
+     *  agent-account picker, where EVERY candidate is one — `~/.claude-klaudiusz` and friends. */
+    showHidden?: boolean
+  },
+): Promise<FsBrowseResponse> {
   return unwrap(
     // An absent `path` stays absent rather than becoming `?path=`: the server distinguishes
     // "no path" (the configured browse root) from an empty one only by `?? ''`, but `hc` drops
-    // an `undefined` value entirely, which keeps the URL the one this call always sent.
-    await cez.api.v1.fs.browse.$get({ query: { path: path === '' ? undefined : path } }, init(opts)),
+    // an `undefined` value entirely, which keeps the URL the one this call always sent. Same
+    // reason `showHidden` is omitted rather than sent as `0`.
+    await cez.api.v1.fs.browse.$get(
+      {
+        query: {
+          path: path === '' ? undefined : path,
+          ...(opts?.showHidden ? { showHidden: '1' } : {}),
+        },
+      },
+      init(opts),
+    ),
     '/fs/browse',
   )
 }
@@ -406,6 +487,13 @@ export async function getProjectRuns(projectId: string, opts?: ReadOptions): Pro
   return unwrap(await cez.api.v1.p[':projectId'].runs.$get({ param: { projectId } }, init(opts)), '/runs')
 }
 
+/** The cross-project task index (`GET /api/v1/workspace/runs-index`) — what lets ⌘K find a task
+ *  without knowing which project it lives in. Workspace-level like the registry, so it has no
+ *  project-scoped spelling and never takes `queryScope()`. */
+export async function getRunsIndex(opts?: ReadOptions): Promise<RunsIndexResponse> {
+  return unwrap(await cez.api.v1.workspace['runs-index'].$get({}, init(opts)), '/workspace/runs-index')
+}
+
 export async function getRun(id: string, opts?: ReadOptions): Promise<ApiRun> {
   return unwrap(
     await cez.api.v1.p[':projectId'].runs[':id'].$get(
@@ -413,6 +501,56 @@ export async function getRun(id: string, opts?: ReadOptions): Promise<ApiRun> {
       init(opts),
     ),
     runPath(id),
+  )
+}
+
+/**
+ * The same read by EXPLICIT project — the twin of `getRun`, for the reason `archiveProjectRun`
+ * spells out: the global Tasks page stands outside every `/p/:projectId`, so `queryScope()` would
+ * name the BOOT project for a row that belongs to another one. It is also the only way that page
+ * can learn a run's steps: its own index ships a deliberately slim entry (no `steps`, no
+ * `runner`), and whether a finished task can be reopened is a question only the full record
+ * answers.
+ */
+export async function getProjectRun(projectId: string, id: string, opts?: ReadOptions): Promise<ApiRun> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].$get(
+      { param: { projectId, id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    runPath(id),
+  )
+}
+
+/** One reverse-paged history page. Validated (not merely cast) because `useRunHistory` iterates
+ *  `events`: see `unwrapValidated`. */
+export async function getRunHistory(
+  id: string,
+  cursor?: string,
+  opts?: ReadOptions,
+): Promise<RunHistoryPage> {
+  return unwrapValidated(
+    await cez.api.v1.p[':projectId'].runs[':id'].history.$get(
+      {
+        param: { projectId: queryScope(), id: encodeURIComponent(id) },
+        query: { ...(cursor !== undefined ? { cursor } : {}) },
+      },
+      init(opts),
+    ),
+    `${runPath(id)}/history`,
+    runHistoryPageSchema,
+  )
+}
+
+/** The compact current-state context for a run. Validated for the same reason as the page above. */
+export async function getRunHistoryContext(id: string, opts?: ReadOptions): Promise<RunHistoryContext> {
+  return unwrapValidated(
+    await cez.api.v1.p[':projectId'].runs[':id']['history-context'].$get(
+      { param: { projectId: queryScope(), id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    `${runPath(id)}/history-context`,
+    runHistoryContextSchema,
   )
 }
 
@@ -648,6 +786,38 @@ export async function getGithubChecks(
   )
 }
 
+/**
+ * Batched status for the PR/issue chips on screen. Takes its project EXPLICITLY, like
+ * `getProjectRuns` and `archiveProjectRun` and for the same reason: the global Tasks page stands
+ * outside every `/p/:projectId`, and its rows belong to different projects — `queryScope()` would
+ * ask the boot project about another project's PR number and get a confident wrong answer.
+ * Callers standing in one project pass their own id.
+ *
+ * Degrades to `{ available: false, reason }` server-side; an absent number is "nothing known",
+ * which the chip renders exactly as it did before statuses existed.
+ */
+export async function getGithubRefStatus(
+  projectId: string,
+  refs: { prs?: readonly number[]; issues?: readonly number[] },
+  opts?: ReadOptions,
+): Promise<GithubRefStatusData> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].github['ref-status'].$get(
+      {
+        param: { projectId },
+        query: {
+          // Spread conditionally: the route reads an ABSENT key as "not asked for", and an empty
+          // string would be a malformed list (a 400) rather than a silent no-op.
+          ...(refs.prs?.length ? { prs: refs.prs.join(',') } : {}),
+          ...(refs.issues?.length ? { issues: refs.issues.join(',') } : {}),
+        },
+      },
+      init(opts),
+    ),
+    '/github/ref-status',
+  )
+}
+
 /** The full comment thread for one issue/PR (#499). Degrades to `{ available: false, reason }`
  *  server-side — an unreachable thread is a one-line hint in the detail view, not an ApiError. */
 export async function getGithubComments(
@@ -775,8 +945,24 @@ export async function getGroup(groupId: string, opts?: ReadOptions): Promise<Gro
 
 // ---- workspace mutations ------------------------------------------------------------------
 
-export async function connectProvider(provider: ProviderId): Promise<ProviderConnectResponse> {
-  return unwrap(await cez.api.v1.providers.connect.$post({ json: { provider } }), '/providers/connect')
+/**
+ * Open a terminal signed in to `provider`, optionally for a NAMED account.
+ *
+ * `profileId` aims the login at one agent account (spec 2026-07-29-agent-profiles): the server
+ * renders `CLAUDE_CONFIG_DIR=… claude /login` for it and fails closed rather than running the bare
+ * command, because a terminal silently pointed at the wrong account is invisible to the user.
+ * Omitted means the discovered account, which is how the Providers card has always called this.
+ */
+export async function connectProvider(
+  provider: ProviderId,
+  profileId?: string,
+): Promise<ProviderConnectResponse> {
+  return unwrap(
+    await cez.api.v1.providers.connect.$post({
+      json: { provider, ...(profileId ? { profileId } : {}) },
+    }),
+    '/providers/connect',
+  )
 }
 
 export async function setProviderEnabled(
@@ -869,10 +1055,14 @@ export async function removeProject(projectId: string): Promise<RemoveProjectRes
 
 /**
  * Set or clear a project's per-project concurrency ceiling
- * (`PATCH /api/projects/:projectId`, spec 2026-07-22). `maxParallel: null`
+ * (`PATCH /api/v1/projects/:projectId`, spec 2026-07-22). `maxParallel: null`
  * clears the override back to "inherit the workspace cap"; an integer pins it.
  * The server applies the new ceiling live (semaphore refresh), so the answer is
  * the updated entry the pane swaps into its list.
+ *
+ * Deliberately NOT where a project's agent account is set — that is
+ * `selectAgentProfile` (`PUT /api/v1/workspace/agent-profiles/selection`), so
+ * the selection is stored beside the accounts it names.
  */
 export async function updateProject(
   projectId: string,
@@ -917,6 +1107,62 @@ export async function archiveRun(id: string, archived = true): Promise<RunRecord
   )
 }
 
+/**
+ * The same route by EXPLICIT project — the twin of `getProjectRuns`, and for the same reason:
+ * the global Tasks page stands outside every `/p/:projectId`, so `queryScope()` would send the
+ * BOOT project's id for a row that belongs to another project, and the archive would either 404
+ * or (with a colliding id) land on the wrong task. Every caller that is already standing in the
+ * run's own project keeps using `archiveRun`.
+ */
+export async function archiveProjectRun(
+  projectId: string,
+  id: string,
+  archived = true,
+): Promise<RunRecord> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].archive.$post({
+      param: { projectId, id: encodeURIComponent(id) },
+      json: { archived },
+    }),
+    runPath(id, '/archive'),
+  )
+}
+
+/**
+ * The read receipt by EXPLICIT project — the twin of `archiveProjectRun`, and for the same
+ * reason: the global Tasks page stands outside every `/p/:projectId`, so `queryScope()` would
+ * stamp the receipt on the boot project. `read: false` is the inverse route (#775).
+ */
+export async function setProjectRunRead(
+  projectId: string,
+  id: string,
+  read: boolean,
+): Promise<RunRecord> {
+  const route = read ? 'read' : 'unread'
+  return unwrap(
+    await (read
+      ? cez.api.v1.p[':projectId'].runs[':id'].read.$post({
+          param: { projectId, id: encodeURIComponent(id) },
+        })
+      : cez.api.v1.p[':projectId'].runs[':id'].unread.$post({
+          param: { projectId, id: encodeURIComponent(id) },
+        })),
+    runPath(id, `/${route}`),
+  )
+}
+
+/** Stop THIS task from resuming itself after a usage limit (spec
+ *  2026-08-03-auto-resume-after-usage-limit) — the per-task twin of the workspace setting.
+ *  Idempotent: a task with nothing scheduled answers the same way. */
+export async function cancelAutoResume(id: string): Promise<CancelAutoResumeResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id']['auto-resume'].$delete({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+    }),
+    runPath(id, '/auto-resume'),
+  )
+}
+
 /** Sweep every finished (done/failed/cancelled) active run into the archive in one call —
  *  the Tasks header's "Archive finished" button. */
 export async function archiveFinished(): Promise<ArchiveFinishedResponse> {
@@ -925,6 +1171,39 @@ export async function archiveFinished(): Promise<ArchiveFinishedResponse> {
       param: { projectId: queryScope() },
     }),
     '/runs/archive-finished',
+  )
+}
+
+/** Read receipt (#unread-done-items): opening a task's thread marks it read. Bodyless —
+ *  the server stamps `seenAt = now` and answers with the updated record. */
+export async function markRunSeen(id: string): Promise<RunRecord> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].read.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+    }),
+    runPath(id, '/read'),
+  )
+}
+
+/** Put a finished task back to unread (#775): the inverse of `markRunSeen`. Bodyless — the
+ *  server CLEARS `seenAt` (an absent receipt is what every reader already treats as unread)
+ *  and answers with the updated record. */
+export async function markRunUnseen(id: string): Promise<RunRecord> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].unread.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+    }),
+    runPath(id, '/unread'),
+  )
+}
+
+/** "Mark all read": stamp every currently-unread finished run in one call. */
+export async function markAllRunsSeen(): Promise<MarkAllReadResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs['read-all'].$post({
+      param: { projectId: queryScope() },
+    }),
+    '/runs/read-all',
   )
 }
 
@@ -938,15 +1217,18 @@ export async function finishRun(id: string): Promise<FinishResponse> {
   )
 }
 
-/** The follow-up composer's optional overrides for a Continue (#401): pick which backend and
- *  model handle the reopened session. Omitted fields keep the run's current backend/model.
- *  `text`/`images` are the prompt the reopened session starts on — omitted, the engine opens
- *  with its plain "Continue.". */
+/** The follow-up composer's optional overrides for a Continue (#401): pick which backend, model
+ *  and agent account handle the reopened session. Omitted fields keep the run's current
+ *  backend/model/account. `text`/`images` are the prompt the reopened session starts on — omitted,
+ *  the engine opens with its plain "Continue.". */
 export interface ContinueOptions {
   text?: string
-  images?: ImageInput[]
+  images?: AttachmentInput[]
   runner?: Runner
   model?: string
+  /** Which login of that agent reopens it (spec 2026-07-29-agent-profiles). Switching account
+   *  starts a fresh session server-side — a session id lives inside ONE account's config dir. */
+  agentProfile?: string
 }
 
 /** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. An optional
@@ -958,11 +1240,33 @@ export async function continueRun(id: string, opts: ContinueOptions = {}): Promi
     ...(opts.images !== undefined ? { images: opts.images } : {}),
     ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
+    ...(opts.agentProfile !== undefined ? { agentProfile: opts.agentProfile } : {}),
   }
   return unwrap(
     await cez.api.v1.p[':projectId'].runs[':id'].continue.$post({
       param: { projectId: queryScope(), id: encodeURIComponent(id) },
       json: body,
+    }),
+    runPath(id, '/continue'),
+  )
+}
+
+/** The same reopen by EXPLICIT project — see `archiveProjectRun`. */
+export async function continueProjectRun(
+  projectId: string,
+  id: string,
+  opts: ContinueOptions = {},
+): Promise<ContinueResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].continue.$post({
+      param: { projectId, id: encodeURIComponent(id) },
+      json: {
+        ...(opts.text !== undefined ? { text: opts.text } : {}),
+        ...(opts.images !== undefined ? { images: opts.images } : {}),
+        ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+        ...(opts.model !== undefined ? { model: opts.model } : {}),
+        ...(opts.agentProfile !== undefined ? { agentProfile: opts.agentProfile } : {}),
+      },
     }),
     runPath(id, '/continue'),
   )
@@ -1084,6 +1388,19 @@ export async function getOpenTargets(opts?: ReadOptions): Promise<OpenTargetsRes
   )
 }
 
+/** Open the ACTIVE PROJECT's own folder in the chosen local app (Settings → "Project folder").
+ *  No path travels: the server opens the scoped project's registered root. 400 for an app this
+ *  machine does not have or a `cli:` handoff, 409 in hosted mode or when the launch failed. */
+export async function openProjectIn(target: string): Promise<OpenProjectInResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId']['open-in'].$post({
+      param: { projectId: queryScope() },
+      json: { target },
+    }),
+    '/open-in',
+  )
+}
+
 /** Open the run's worktree in the chosen local app. 409 with `path` when it could not launch. */
 export async function openRunIn(
   id: string,
@@ -1142,6 +1459,22 @@ export async function sendMessage(id: string, message: MessageInput): Promise<Me
   return unwrap(
     await cez.api.v1.p[':projectId'].runs[':id'].messages.$post({
       param: { projectId: queryScope(), id: encodeURIComponent(id) },
+      json: { text: message.text ?? '', images: message.images ?? [] },
+    }),
+    runPath(id, '/messages'),
+  )
+}
+
+/** The same delivery by EXPLICIT project — see `archiveProjectRun`. What lets a chip on the
+ *  global Tasks page speak to a run in a project this page is not standing in. */
+export async function sendProjectRunMessage(
+  projectId: string,
+  id: string,
+  message: MessageInput,
+): Promise<MessageResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].messages.$post({
+      param: { projectId, id: encodeURIComponent(id) },
       json: { text: message.text ?? '', images: message.images ?? [] },
     }),
     runPath(id, '/messages'),
@@ -1359,17 +1692,158 @@ export async function getWorkspaceUiState(opts?: ReadOptions): Promise<Workspace
 
 /** Shallow top-level merge server-side, same as its per-repo twin — send whole top-level
  *  objects (`{ sidebar: {...} }`), never a nested leaf alone. Answers the merged state. */
-export async function putWorkspaceUiState(patch: WorkspaceUiState): Promise<WorkspaceUiState> {
+export async function putWorkspaceUiState(
+  patch: SetWorkspaceUiStateInput,
+  opts: { keepalive?: boolean } = {},
+): Promise<WorkspaceUiState> {
   return unwrap(
-    await cez.api.v1.workspace['ui-state'].$put({ json: patch }),
+    await cez.api.v1.workspace['ui-state'].$put(
+      { json: patch },
+      { init: { keepalive: opts.keepalive } },
+    ),
     '/workspace/ui-state',
   )
 }
 
-/** The global settings slice of `~/.cezar/config.json` (step 2.7) — Settings → Resources and
- *  (step 4.4) the checkout-root field. Workspace-level, so never scope-prefixed. */
+/**
+ * The global settings slice of `~/.cezar/config.json` (step 2.7) — Settings → Resources, (step 4.4)
+ * the checkout-root field, and the agent defaults.
+ *
+ * `agentDefaults` is materialized HERE rather than guarded at each read site, for the same reason
+ * the agent-accounts collections are: during development the cockpit and the server can be
+ * different versions (Vite serves this bundle while `dist/` or another process serves the API), and
+ * an older server answering without the key crashed the accounts page on `.runner`. One boundary,
+ * one place a missing key becomes the empty answer it means.
+ */
 export async function getWorkspaceConfig(opts?: ReadOptions): Promise<WorkspaceConfigResponse> {
-  return unwrap(await cez.api.v1.workspace.config.$get({}, init(opts)), '/workspace/config')
+  const answer = await unwrap(
+    await cez.api.v1.workspace.config.$get({}, init(opts)),
+    '/workspace/config',
+  )
+  return { ...answer, agentDefaults: answer.agentDefaults ?? {} }
+}
+
+/**
+ * Every agent account on this machine (spec 2026-07-29-agent-profiles) — the discovered defaults
+ * plus any extra config dirs. Workspace-level, so never scope-prefixed. Hosted mode answers
+ * `{editable: false, profiles: [], …}` rather than leaking host paths.
+ *
+ * The collections are filled in HERE rather than guarded at each of the ~5 read sites. During
+ * development the cockpit and the server can be different versions (Vite serves this bundle while
+ * `dist/` or another process serves the API), and an older server answering without `files` or
+ * `selections` crashed the accounts pane on `.map` of undefined. Normalizing at the boundary — the
+ * job this module already does for provider status — means every consumer can trust the shape, and
+ * the next additive field is one line here instead of a hunt for missing `??`s.
+ */
+export async function getAgentProfiles(opts?: ReadOptions): Promise<AgentProfilesResponse> {
+  const answer = await unwrap(
+    await cez.api.v1.workspace['agent-profiles'].$get({}, init(opts)),
+    '/workspace/agent-profiles',
+  )
+  return {
+    ...answer,
+    profileCapableProviders: answer.profileCapableProviders ?? [],
+    selections: answer.selections ?? {},
+    defaults: answer.defaults ?? {},
+    profiles: (answer.profiles ?? []).map((profile) => ({ ...profile, files: profile.files ?? [] })),
+  }
+}
+
+/** Register an extra config dir as an account. The id is allocated server-side from the label. */
+export async function createAgentProfile(
+  input: CreateAgentProfileInput,
+): Promise<AgentProfileResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'].$post({ json: input }),
+    '/workspace/agent-profiles',
+  )
+}
+
+/** One account's auth state, probed for real (spec 2026-07-29-agent-profiles). Off the listing on
+ *  purpose: a probe shells out to an agent CLI, so the pane paints first and fills rows in as these
+ *  land. `refresh` drops the server's cached answer for this account and re-probes. */
+export async function getAgentAccountStatus(
+  routeId: string,
+  opts?: ReadOptions & { refresh?: boolean },
+): Promise<AgentAccountStatusResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'][':id'].status.$get(
+      {
+        param: { id: encodeURIComponent(routeId) },
+        query: opts?.refresh ? { refresh: '1' } : {},
+      },
+      init(opts),
+    ),
+    `/workspace/agent-profiles/${encodeURIComponent(routeId)}/status`,
+  )
+}
+
+/** Who an account is signed in as (spec 2026-07-29-agent-profiles). Fetched only when the user
+ *  asks for it — it is deliberately NOT part of the listing, so "hidden by default" means the data
+ *  is absent rather than merely unrendered. Address discovered accounts via `agentAccountRouteId`. */
+export async function getAgentAccountDetails(
+  routeId: string,
+  opts?: ReadOptions,
+): Promise<AgentAccountDetailsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'][':id'].details.$get(
+      { param: { id: encodeURIComponent(routeId) } },
+      init(opts),
+    ),
+    `/workspace/agent-profiles/${encodeURIComponent(routeId)}/details`,
+  )
+}
+
+/** Open one of an account's own config files — or its folder — in a local app. `file` is a catalog
+ *  id (or `folder`); this never sends a path, so the route has no traversal surface. */
+export async function openAgentAccountFile(
+  routeId: string,
+  input: OpenAgentAccountFileInput,
+): Promise<OpenAgentAccountFileResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'][':id'].open.$post({
+      param: { id: encodeURIComponent(routeId) },
+      json: input,
+    }),
+    `/workspace/agent-profiles/${encodeURIComponent(routeId)}/open`,
+  )
+}
+
+/** Point one project's provider at an account. `profileId: null` clears it back to the
+ *  discovered account. Lives on the accounts family, not `PATCH /projects`, because the selection
+ *  is stored beside the accounts it names. */
+export async function selectAgentProfile(
+  input: SelectAgentProfileInput,
+): Promise<AgentProfileSelectionsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'].selection.$put({ json: input }),
+    '/workspace/agent-profiles/selection',
+  )
+}
+
+/** Rename an account or repoint its folder. Partial — send only what changed. */
+export async function updateAgentProfile(
+  id: string,
+  input: UpdateAgentProfileInput,
+): Promise<AgentProfileResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'][':id'].$patch({
+      param: { id: encodeURIComponent(id) },
+      json: input,
+    }),
+    `/workspace/agent-profiles/${encodeURIComponent(id)}`,
+  )
+}
+
+/** Deregister an account. The folder is never touched, and projects using it fall back to the
+ *  discovered default (the server scrubs their references in the same write). */
+export async function removeAgentProfile(id: string): Promise<RemoveAgentProfileResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'][':id'].$delete({
+      param: { id: encodeURIComponent(id) },
+    }),
+    `/workspace/agent-profiles/${encodeURIComponent(id)}`,
+  )
 }
 
 /** Cached Open Mercato update state for one registered project. The GET is immediate; the

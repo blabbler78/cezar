@@ -131,6 +131,27 @@ describe('reduceThread — item ids across workflow steps', () => {
   })
 })
 
+describe('reduceThread — stable source identities under history prepend', () => {
+  it('keeps an existing turn key when an older page is prepended', () => {
+    const tail = [
+      line(100, 'turn.started', { turnId: 'tail' }),
+      line(101, 'item.completed', {
+        item: { kind: 'message', id: 'm-tail', role: 'assistant', text: 'tail' },
+      }),
+    ]
+    const tailId = reduceThread(tail).turns[0]!.id
+    const withOlder = reduceThread([
+      line(10, 'turn.started', { turnId: 'older' }),
+      line(11, 'item.completed', {
+        item: { kind: 'message', id: 'm-old', role: 'assistant', text: 'old' },
+      }),
+      ...tail,
+    ])
+    expect(tailId).toBe('turn-seq-100')
+    expect(withOlder.turns[1]!.id).toBe(tailId)
+  })
+})
+
 describe('reduceThread — v1-only fallback (pre-v2 transcripts)', () => {
   it('hides Codex collaboration bookkeeping that protocol v2 renders as grouped agents', () => {
     const { turns } = reduceThread([
@@ -798,6 +819,19 @@ describe('reduceThread — AskUser cards (#473)', () => {
     expect(msg?.text).toBe('Pick one.')
   })
 
+  it('suppresses a complete provisional marker during the active turn', () => {
+    const markerJson = JSON.stringify({ questions: ASK.questions })
+    const events = [
+      line(1, 'item.completed', {
+        item: { kind: 'message', id: 'm1', role: 'assistant', text: `Pick one.\n\nCEZ:ASK ${markerJson}` },
+      }),
+    ]
+    const msg = reduceThread(events, { activeTurn: true }).turns[0]!.items.find(
+      (item) => item.kind === 'message',
+    ) as { text: string } | undefined
+    expect(msg?.text).toBe('Pick one.')
+  })
+
   // Regression (blank-question bug): a marker whose card never materialized —
   // invalid payload, or the session died before turn-end emitted ask.requested —
   // must stay visible. The card is the only other place the questions exist;
@@ -810,6 +844,23 @@ describe('reduceThread — AskUser cards (#473)', () => {
       }),
     ]).find((i) => i.kind === 'message') as { text: string } | undefined
     expect(msg?.text).toBe(raw)
+  })
+
+  it('restores a hard-invalid marker when the active turn settles without a card', () => {
+    const raw = 'Pick one.\n\nCEZ:ASK {"questions":[]}'
+    const events = [
+      line(1, 'item.completed', {
+        item: { kind: 'message', id: 'm1', role: 'assistant', text: raw },
+      }),
+    ]
+    const active = reduceThread(events, { activeTurn: true }).turns[0]!.items.find(
+      (item) => item.kind === 'message',
+    ) as { text: string } | undefined
+    const settled = reduceThread(events).turns[0]!.items.find(
+      (item) => item.kind === 'message',
+    ) as { text: string } | undefined
+    expect(active?.text).toBe('Pick one.')
+    expect(settled?.text).toBe(raw)
   })
 
   it("an ask card in ANOTHER turn does not license stripping this turn's marker", () => {

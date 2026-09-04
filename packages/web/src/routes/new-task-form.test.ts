@@ -7,6 +7,7 @@ import {
   availableRunners,
   buildCreateRunBody,
   MODELS_BY_RUNNER,
+  modelConflictsWithRunner,
   modelsForRunner,
   modelCatalogStatus,
   pushRecentSource,
@@ -80,10 +81,49 @@ describe('model option resolution', () => {
     expect(modelCatalogStatus('claude', undefined, true)).toBeUndefined()
   })
 
-  it('opencode: provider/model ids, newest Anthropic + OpenAI', () => {
-    expect(modelsForRunner('opencode').map((m) => m.id)).toEqual([
-      '', 'anthropic/claude-opus-4-8', 'anthropic/claude-sonnet-5', 'openai/gpt-5.1', 'openai/gpt-5.1-codex',
-    ])
+  it('opencode: auto alone until the host catalog answers (#794)', () => {
+    expect(modelsForRunner('opencode').map((m) => m.id)).toEqual([''])
+    expect(
+      modelsForRunner('opencode', {
+        runner: 'opencode',
+        models: [
+          { id: 'openai/gpt-5.4', label: 'openai/gpt-5.4', description: 'via openai' },
+          { id: 'anthropic/claude-sonnet-5', label: 'anthropic/claude-sonnet-5', description: 'via anthropic' },
+        ],
+        source: 'live',
+        stale: false,
+      }).map((m) => m.id),
+    ).toEqual(['', 'openai/gpt-5.4', 'anthropic/claude-sonnet-5'])
+  })
+
+  it('a pinned OpenCode id the host no longer offers stays selectable', () => {
+    expect(
+      modelsForRunner(
+        'opencode',
+        { runner: 'opencode', models: [], source: 'unavailable', stale: false },
+        ['openai/gpt-5.1'],
+      ).map((m) => m.id),
+    ).toEqual(['', 'openai/gpt-5.1'])
+  })
+
+  it('never reads a provider-spanning runner’s preset as another runner’s exclusive model', () => {
+    // pi lists `openai/gpt-5.1` and `anthropic/claude-sonnet-5` as presets, and OpenCode serves
+    // the very same models from the very same providers. Counting pi's list as evidence of
+    // "belongs to another runner" would silently strip those ids from OpenCode's picker — the
+    // #794 bug, reintroduced through the back door.
+    for (const model of ['openai/gpt-5.1', 'anthropic/claude-sonnet-5']) {
+      expect(modelConflictsWithRunner(model, 'opencode')).toBe(false)
+      expect(modelConflictsWithRunner(model, 'pi')).toBe(false)
+    }
+    // The guard it must NOT lose: a bare id that is unmistakably one single-provider runner's.
+    expect(modelConflictsWithRunner('opus', 'codex')).toBe(true)
+  })
+
+  it('names the runner whose catalog is stale or unavailable', () => {
+    expect(
+      modelCatalogStatus('opencode', { runner: 'opencode', models: [], source: 'cache', stale: true, reason: 'raw' }),
+    ).toBe('Using cached OpenCode model list')
+    expect(modelCatalogStatus('opencode', undefined, true)).toBe('Latest OpenCode models unavailable')
   })
 
   it('resolveModel keeps known picks and arbitrary native model pins', () => {
@@ -107,25 +147,26 @@ describe('model option resolution', () => {
   })
 })
 
-describe('resolveSource (candidate validation + cold quick-task default)', () => {
+describe('resolveSource (the draft pick, validated — no cold default)', () => {
   const skills = [skill('om-fix'), skill('deploy', 'global')]
   const workflows = [workflow('quick-task'), workflow('fix-and-verify')]
 
-  it('takes the first candidate that still exists', () => {
-    expect(
-      resolveSource(
-        [{ source: 'skill', ref: 'gone' }, { source: 'workflow', ref: 'fix-and-verify' }],
-        skills,
-        workflows,
-      ),
-    ).toEqual({ source: 'workflow', ref: 'fix-and-verify' })
+  it('keeps a pick the catalog still has', () => {
+    expect(resolveSource({ source: 'workflow', ref: 'fix-and-verify' }, skills, workflows))
+      .toEqual({ source: 'workflow', ref: 'fix-and-verify' })
+    expect(resolveSource({ source: 'skill', ref: 'om-fix' }, skills, workflows))
+      .toEqual({ source: 'skill', ref: 'om-fix' })
   })
 
-  it('defaults cold to quick-task, then first skill when quick-task is unavailable', () => {
-    expect(resolveSource([], skills, workflows)).toEqual({ source: 'workflow', ref: 'quick-task' })
-    expect(resolveSource([], skills, [workflow('fix-and-verify')])).toEqual({ source: 'skill', ref: 'om-fix' })
-    expect(resolveSource([], [], workflows)).toEqual({ source: 'workflow', ref: 'quick-task' })
-    expect(resolveSource([], [], [])).toEqual({ source: 'workflow', ref: 'quick-task' })
+  it('resolves to NOTHING when there is no pick, or the pick is gone', () => {
+    // The empty composer state: `/new` opens here, and nothing preselects it away.
+    expect(resolveSource(null, skills, workflows)).toBeNull()
+    expect(resolveSource(undefined, skills, workflows)).toBeNull()
+    // A skill deleted since it was drafted must not stay in the pill.
+    expect(resolveSource({ source: 'skill', ref: 'gone' }, skills, workflows)).toBeNull()
+    expect(resolveSource({ source: 'workflow', ref: 'gone' }, skills, workflows)).toBeNull()
+    // An empty catalog is the same answer, with no quick-task/first-skill fallback left.
+    expect(resolveSource({ source: 'skill', ref: 'om-fix' }, [], [])).toBeNull()
   })
 
   it('sourceExists checks the matching catalog only', () => {
@@ -156,6 +197,21 @@ describe('buildCreateRunBody — the exact POST /api/v1/runs payloads legacy sen
     })
     // What actually goes over the wire: the undefineds vanish.
     expect(JSON.parse(JSON.stringify(body))).toEqual({ task: 'do the thing', workflow: 'quick-task' })
+  })
+
+  it('NO source → the built-in quick-task, because the route demands workflow XOR steps', () => {
+    const body = buildCreateRunBody({
+      task: 'just do it',
+      source: null,
+      model: '',
+      runner: 'claude',
+      defaultRunner: 'claude',
+      variants: 1,
+      images: [],
+    })
+    // Byte-identical to picking quick-task by hand — which is why the picker stopped offering
+    // both. `POST /runs` 400s on a body carrying neither key, so "nothing" cannot go out bare.
+    expect(JSON.parse(JSON.stringify(body))).toEqual({ task: 'just do it', workflow: 'quick-task' })
   })
 
   it('skill source → the one-step inline chain (spec 008: same shape as inbox/bookmarklet)', () => {

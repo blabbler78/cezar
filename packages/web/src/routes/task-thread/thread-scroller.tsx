@@ -12,11 +12,15 @@ import { Virtualizer, type VirtualizerHandle } from 'virtua'
 
 import {
   NEAR_BOTTOM_SLACK_PX,
+  isNearHistoryStart,
   isNearBottom,
+  firstVisibleThreadAnchor,
   readThreadMeasurements,
   readThreadScroll,
   saveThreadMeasurements,
   saveThreadScroll,
+  threadAnchorScrollTop,
+  type ThreadRowPosition,
 } from './thread-scroll'
 
 /**
@@ -47,13 +51,15 @@ export interface ThreadScrollControls {
   pillVisible: boolean
   /** The pill's action: smooth-scroll to the tail and stick again. */
   jumpToLatest: () => void
+  /** Load one older page while preserving the current pixel anchor. */
+  loadOlder: () => void
   /** Re-pin if stuck — the keyboard-settled hook (content height didn't change, but the
    *  visual viewport did, so the RO won't fire). */
   restickIfStuck: () => void
 }
 
 /**
- * Stick-to-bottom, the jump pill, and the per-run scroll cache (spec §"Task thread").
+ * Stick-to-bottom, the jump pill, and the per-view scroll cache (spec §"Task thread").
  *
  *  - While content grows, stay pinned to the bottom ONLY while the reader is within
  *    {@link NEAR_BOTTOM_SLACK_PX} of it; the moment they scroll up, growth stops moving them
@@ -62,7 +68,16 @@ export interface ThreadScrollControls {
  *    including through the SSE replay, which re-grows the content after mount: the desired
  *    offset is re-applied on every growth until it is reachable or the user scrolls.
  */
-export function useThreadScroll(runId: string): ThreadScrollControls {
+export function useThreadScroll(
+  viewKey: string,
+  options: {
+    surface?: 'document' | 'panel'
+    onLoadOlder?: () => Promise<void>
+    onJumpToLatest?: () => Promise<void>
+    rowKeys?: readonly string[]
+  } = {},
+): ThreadScrollControls {
+  const { surface = 'document', onLoadOlder, onJumpToLatest, rowKeys = [] } = options
   const scrollElRef = useRef<HTMLElement | null>(null)
   // State, not a ref: crossing the virtualization threshold mid-replay REPLACES the rows
   // container, and the observers below must re-subscribe to the new element.
@@ -72,15 +87,10 @@ export function useThreadScroll(runId: string): ThreadScrollControls {
   const stuckRef = useRef(true)
   /** A cached offset not yet reachable (content still replaying). Cleared by user intent. */
   const pendingRestoreRef = useRef<number | null>(null)
-  /** Arrival (cache restore / land at tail) happens once per run, not once per container. */
+  /** Arrival (cache restore / land at tail) happens once per view, not once per container. */
   const arrivedForRef = useRef<string | null>(null)
   /** virtua's handle while virtualized (VirtualRows fills it), null in flat mode. */
   const virtualizerRef = useRef<VirtualizerHandle | null>(null)
-
-  const attachContent = useCallback((el: HTMLElement | null) => {
-    setContentEl(el)
-    if (el) scrollElRef.current = el.closest<HTMLElement>('[data-slot="main"]')
-  }, [])
 
   // EVERY programmatic scroll goes through virtua's handle when virtualized. A raw
   // `scrollTop` write races virtua's own jump compensation (it also writes scrollTop, from
@@ -99,37 +109,118 @@ export function useThreadScroll(runId: string): ThreadScrollControls {
     if (scroller) setOffset(scroller.scrollHeight - scroller.clientHeight)
   }, [setOffset])
 
+  const applyArrival = useCallback(() => {
+    const scroller = scrollElRef.current
+    if (!scroller) return
+    if (arrivedForRef.current !== viewKey) {
+      arrivedForRef.current = viewKey
+      const memory = readThreadScroll(viewKey)
+      if (memory && !memory.atBottom) {
+        stuckRef.current = false
+        pendingRestoreRef.current = memory.top
+      } else {
+        stuckRef.current = true
+        pendingRestoreRef.current = null
+      }
+    }
+    if (pendingRestoreRef.current !== null) setOffset(pendingRestoreRef.current)
+    else if (stuckRef.current) toBottom()
+  }, [viewKey, setOffset, toBottom])
+
+  // The callback ref runs in the destination commit itself. Applying arrival here closes the
+  // gap between the route render and the follow-up state update that installs subscriptions;
+  // the layout effect below re-applies once virtua's handle/content state are fully attached.
+  const attachContent = useCallback((el: HTMLElement | null) => {
+    setContentEl(el)
+    if (el) {
+      scrollElRef.current = el.closest<HTMLElement>(
+        surface === 'panel' ? '[data-slot="transcript-viewport"]' : '[data-slot="main"]',
+      )
+      applyArrival()
+    }
+  }, [surface, applyArrival])
+
   const restickIfStuck = useCallback(() => {
     if (stuckRef.current) toBottom()
   }, [toBottom])
+
+  const loadingOlderRef = useRef(false)
+  const wheelGestureActiveRef = useRef(false)
+  const wheelGestureTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const touchHistoryConsumedRef = useRef(false)
+  const pointerHistoryConsumedRef = useRef(false)
+  const rowKeysRef = useRef(rowKeys)
+  rowKeysRef.current = rowKeys
+
+  const measuredRows = useCallback((scroller: HTMLElement): ThreadRowPosition[] =>
+    [...scroller.querySelectorAll<HTMLElement>('[data-slot="thread-row"][data-row-key]')].map((row) => {
+      const rect = row.getBoundingClientRect()
+      return { key: row.dataset.rowKey!, top: rect.top, bottom: rect.bottom }
+    }), [])
+
+  const loadOlder = useCallback(() => {
+    const scroller = scrollElRef.current
+    if (!scroller || !onLoadOlder || loadingOlderRef.current) return
+    loadingOlderRef.current = true
+    const beforeHeight = scroller.scrollHeight
+    const beforeTop = scroller.scrollTop
+    const beforeViewportTop = scroller.getBoundingClientRect().top
+    const anchor = firstVisibleThreadAnchor(beforeViewportTop, measuredRows(scroller))
+    void onLoadOlder().finally(() => {
+      requestAnimationFrame(() => {
+        const current = scrollElRef.current
+        if (current) {
+          const fallbackTop = beforeTop + Math.max(0, current.scrollHeight - beforeHeight)
+          const viewportTop = current.getBoundingClientRect().top
+          const anchorIndex = anchor === undefined ? -1 : rowKeysRef.current.indexOf(anchor.key)
+          const handle = virtualizerRef.current
+          if (handle && anchorIndex >= 0) {
+            handle.scrollToIndex(anchorIndex, { align: 'start', offset: -anchor!.offset })
+          } else {
+            setOffset(threadAnchorScrollTop(
+              current.scrollTop,
+              viewportTop,
+              anchor,
+              measuredRows(current),
+              fallbackTop,
+            ))
+          }
+        }
+        loadingOlderRef.current = false
+      })
+    })
+  }, [measuredRows, onLoadOlder, setOffset])
+
+  useEffect(() => () => clearTimeout(wheelGestureTimerRef.current), [])
 
   const jumpToLatest = useCallback(() => {
     const scroller = scrollElRef.current
     if (!scroller) return
     pendingRestoreRef.current = null
     stuckRef.current = true
-    scroller.scrollTo({ top: scroller.scrollHeight - scroller.clientHeight, behavior: 'smooth' })
-  }, [])
+    void (onJumpToLatest?.() ?? Promise.resolve()).finally(() => {
+      requestAnimationFrame(() => {
+        const current = scrollElRef.current
+        current?.scrollTo({ top: current.scrollHeight - current.clientHeight, behavior: 'smooth' })
+      })
+    })
+  }, [onJumpToLatest])
+
+  // Arrival is the route-owned pre-paint write. AppShell deliberately does not reset task
+  // routes, so a destination thread never exposes an intermediate top-of-transcript frame.
+  // Keep this separate from the long-lived event/observer effect below: route arrival has a
+  // stricter timing contract, while subscriptions only need to exist after paint.
+  useLayoutEffect(() => {
+    const scroller = scrollElRef.current
+    const content = contentEl
+    if (!scroller || !content) return
+    applyArrival()
+  }, [contentEl, applyArrival])
 
   useEffect(() => {
     const scroller = scrollElRef.current
     const content = contentEl
     if (!scroller || !content) return
-
-    // Arrival: cached position if the reader had one away from the tail, else the tail.
-    // Once per run — a container swap (threshold crossing) re-subscribes without re-arriving.
-    if (arrivedForRef.current !== runId) {
-      arrivedForRef.current = runId
-      const memory = readThreadScroll(runId)
-      if (memory && !memory.atBottom) {
-        stuckRef.current = false
-        pendingRestoreRef.current = memory.top
-        scroller.scrollTop = memory.top
-      } else {
-        stuckRef.current = true
-        toBottom()
-      }
-    }
 
     // PINNING FOLLOWS INTENT, NOT POSITION. During replay/streaming the scroller's position
     // moves without the user's hand: this hook pins it, virtua re-measures rows and writes
@@ -146,6 +237,8 @@ export function useThreadScroll(runId: string): ThreadScrollControls {
     const RESTICK_INTENT_MS = 2000
     let downIntentAt = 0
     let lastTouchY: number | null = null
+    let pointerScrolling = false
+    let previousScrollTop = scroller.scrollTop
     const unstick = () => {
       pendingRestoreRef.current = null
       stuckRef.current = false
@@ -155,31 +248,66 @@ export function useThreadScroll(runId: string): ThreadScrollControls {
       downIntentAt = Date.now()
     }
     const onWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) unstick()
+      if (event.deltaY < 0) {
+        unstick()
+        const freshGesture = !wheelGestureActiveRef.current
+        wheelGestureActiveRef.current = true
+        clearTimeout(wheelGestureTimerRef.current)
+        wheelGestureTimerRef.current = setTimeout(() => {
+          wheelGestureActiveRef.current = false
+        }, 180)
+        if (freshGesture && isNearHistoryStart(scroller)) loadOlder()
+      }
       else markDown()
     }
     const onKey = (event: KeyboardEvent) => {
-      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) unstick()
+      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) {
+        unstick()
+        if (!event.repeat && isNearHistoryStart(scroller)) loadOlder()
+      }
       else if (['ArrowDown', 'PageDown', 'End'].includes(event.key)) markDown()
     }
     const onPointerDown = () => {
+      pointerScrolling = true
+      pointerHistoryConsumedRef.current = false
+      previousScrollTop = scroller.scrollTop
       if (!isNearBottom(scroller, NEAR_BOTTOM_SLACK_PX)) {
         unstick()
         markDown() // a scrollbar grab can go either way — let a drag to the tail re-pin
       }
     }
+    const onPointerUp = () => {
+      pointerScrolling = false
+    }
     const onTouchStart = (event: TouchEvent) => {
+      touchHistoryConsumedRef.current = false
       lastTouchY = event.touches[0]?.clientY ?? null
     }
     const onTouchMove = (event: TouchEvent) => {
       const y = event.touches[0]?.clientY
       if (y === undefined) return
       // Finger moving down pans the content up (away from the tail), and vice versa.
-      if (lastTouchY !== null && y > lastTouchY + 1) unstick()
+      if (lastTouchY !== null && y > lastTouchY + 1) {
+        unstick()
+        if (!touchHistoryConsumedRef.current && isNearHistoryStart(scroller)) {
+          touchHistoryConsumedRef.current = true
+          loadOlder()
+        }
+      }
       else if (lastTouchY !== null && y < lastTouchY - 1) markDown()
       lastTouchY = y
     }
     const onScroll = () => {
+      if (
+        pointerScrolling &&
+        !pointerHistoryConsumedRef.current &&
+        scroller.scrollTop < previousScrollTop &&
+        isNearHistoryStart(scroller)
+      ) {
+        pointerHistoryConsumedRef.current = true
+        loadOlder()
+      }
+      previousScrollTop = scroller.scrollTop
       const near = isNearBottom(scroller, NEAR_BOTTOM_SLACK_PX)
       // No re-pinning while a restore is in flight: the clamped position rides the (still
       // growing) bottom on its way to the cached offset, and near-bottom moments there are
@@ -191,7 +319,7 @@ export function useThreadScroll(runId: string): ThreadScrollControls {
       // …and no overwriting the memory being restored, either — leaving again mid-restore
       // must find the parked position, not a replay artifact.
       if (pendingRestoreRef.current === null) {
-        saveThreadScroll(runId, { top: scroller.scrollTop, atBottom: near })
+        saveThreadScroll(viewKey, { top: scroller.scrollTop, atBottom: near })
       }
     }
     scroller.addEventListener('scroll', onScroll, { passive: true })
@@ -199,6 +327,7 @@ export function useThreadScroll(runId: string): ThreadScrollControls {
     scroller.addEventListener('touchstart', onTouchStart, { passive: true })
     scroller.addEventListener('touchmove', onTouchMove, { passive: true })
     scroller.addEventListener('pointerdown', onPointerDown, { passive: true })
+    window.addEventListener('pointerup', onPointerUp, { passive: true })
     scroller.addEventListener('keydown', onKey)
 
     // Content growth (streamed items, replay, virtua's total-size updates) re-applies the
@@ -225,12 +354,13 @@ export function useThreadScroll(runId: string): ThreadScrollControls {
       scroller.removeEventListener('touchstart', onTouchStart)
       scroller.removeEventListener('touchmove', onTouchMove)
       scroller.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointerup', onPointerUp)
       scroller.removeEventListener('keydown', onKey)
       observer?.disconnect()
     }
-  }, [runId, contentEl, setOffset, toBottom])
+  }, [viewKey, contentEl, loadOlder, setOffset, toBottom])
 
-  return { attachContent, scrollElRef, virtualizerRef, pillVisible, jumpToLatest, restickIfStuck }
+  return { attachContent, scrollElRef, virtualizerRef, pillVisible, jumpToLatest, loadOlder, restickIfStuck }
 }
 
 /**
@@ -259,6 +389,7 @@ export function ThreadRows({
         <div
           key={row.key}
           data-slot="thread-row"
+          data-row-key={row.key}
           className="flex w-full flex-col pb-2.5 [contain-intrinsic-block-size:auto_3rem] [content-visibility:auto]"
         >
           {row.node}
@@ -341,7 +472,7 @@ function VirtualRows({
         {...(measurements !== undefined ? { cache: measurements } : {})}
       >
         {rows.map((row) => (
-          <div key={row.key} data-slot="thread-row" className="flex w-full flex-col pb-2.5">
+          <div key={row.key} data-slot="thread-row" data-row-key={row.key} className="flex w-full flex-col pb-2.5">
             {row.node}
           </div>
         ))}

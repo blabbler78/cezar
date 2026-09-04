@@ -122,6 +122,20 @@ describe('AskCard', () => {
     expect(screen.getByText('Tree-shakeable')).toBeTruthy()
   })
 
+  it('wraps schema-valid unbroken question and option text inside the card', () => {
+    const question = 'q'.repeat(400)
+    const label = 'l'.repeat(60)
+    const description = 'd'.repeat(280)
+    renderAsk({
+      ...singleAsk,
+      questions: [{ header: 'Limits', question, options: [{ label, description }, { label: 'Other' }] }],
+    })
+
+    expect(screen.getByText(question).className).toContain('break-words')
+    expect(screen.getByText(label).className).toContain('break-words')
+    expect(screen.getByText(description).className).toContain('break-words')
+  })
+
   it('a single single-select question sends "header: label" on one tap (no Send button)', () => {
     renderAsk(singleAsk)
     expect(screen.queryByRole('button', { name: 'Send answer' })).toBeNull()
@@ -158,7 +172,7 @@ describe('AskCard', () => {
   it('a resolved ask collapses to a compact answered summary with no option buttons', () => {
     renderAsk({ ...singleAsk, resolved: true, answer: 'Library: date-fns' })
     expect(screen.getByText('Answered')).toBeTruthy()
-    expect(screen.getByText('Library: date-fns')).toBeTruthy()
+    expect(screen.getByText('Library: date-fns').className).toContain('break-words')
     expect(screen.queryByRole('button', { name: /date-fns/ })).toBeNull()
   })
 
@@ -238,6 +252,32 @@ describe('AskCard — answering after the session has ended', () => {
     fireEvent.click(screen.getByRole('button', { name: /date-fns/ }))
     await waitFor(() => expect(continueAsync).toHaveBeenCalledTimes(1))
     expect(continueAsync).toHaveBeenCalledWith({ text: 'Library: date-fns' })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('waits for idle teardown before retrying the continuation, without accepting a duplicate tap', async () => {
+    mutateAsync.mockRejectedValueOnce(new ApiError(409, 'session closed'))
+    let resolveContinuation: ((value: { continued: true }) => void) | undefined
+    const continuation = new Promise<{ continued: true }>((resolve) => {
+      resolveContinuation = resolve
+    })
+    continueAsync
+      .mockRejectedValueOnce(new ApiError(409, 'run is still active'))
+      .mockReturnValueOnce(continuation)
+    renderAsk(singleAsk, { ...activeRun, steps: [step({ sessionId: 'sess-1' })] })
+
+    const option = screen.getByRole('button', { name: /date-fns/ })
+    fireEvent.click(option)
+    await waitFor(() => expect(continueAsync).toHaveBeenCalledTimes(1))
+    expect((option as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(option)
+
+    await waitFor(() => expect(continueAsync).toHaveBeenCalledTimes(2))
+    expect(continueAsync).toHaveBeenNthCalledWith(1, { text: 'Library: date-fns' })
+    expect(continueAsync).toHaveBeenNthCalledWith(2, { text: 'Library: date-fns' })
+    expect(mutateAsync).toHaveBeenCalledTimes(1)
+    resolveContinuation?.({ continued: true })
+    await waitFor(() => expect((option as HTMLButtonElement).disabled).toBe(false))
     expect(screen.queryByRole('alert')).toBeNull()
   })
 

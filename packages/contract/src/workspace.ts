@@ -44,8 +44,27 @@ export const workspaceConfigResponseSchema = z.object({
     maxParallel: z.number(),
     maxMonitoringSessions: z.number(),
     monitoringWakeIntervalMinutes: z.number().nullable(),
+    /** Resume a run a provider usage limit stopped, once the limit resets. Default `true`. */
+    autoResumeOnUsageLimit: z.boolean(),
     memoryLimitMb: z.number().nullable(),
     worktreeRetentionDefault: z.number(),
+  }),
+  /**
+   * What a repo that has set none of its own runs (spec 2026-07-29-agent-profiles).
+   *
+   * Both keys are OPTIONAL on the wire, and that is load-bearing rather than lax: absent means
+   * "this machine has no opinion, the built-in default applies", and it has to stay distinguishable
+   * from a value someone chose or the fallback collapses into "always claude". Consulted only where
+   * the repo's own `.ai/cezar/config.json` is silent — a repo that chose is never overruled.
+   */
+  agentDefaults: z.object({
+    runner: runnerSchema.optional(),
+    models: z.object({
+      claude: z.string().optional(),
+      codex: z.string().optional(),
+      opencode: z.string().optional(),
+      pi: z.string().optional(),
+    }).optional(),
   }),
 });
 export type WorkspaceConfigResponse = z.infer<typeof workspaceConfigResponseSchema>;
@@ -67,11 +86,27 @@ export const setWorkspaceConfigInputSchema = z.object({
       worktree: z.boolean().nullable().optional(),
     })
     .optional(),
+  /** Machine-wide agent defaults. `null` on a key CLEARS it back to "no opinion", which a bare
+   *  absent key cannot say in a partial patch. */
+  agentDefaults: z
+    .object({
+      runner: runnerSchema.nullable().optional(),
+      models: z
+        .object({
+          claude: z.string().trim().min(1).max(200).nullable().optional(),
+          codex: z.string().trim().min(1).max(200).nullable().optional(),
+          opencode: z.string().trim().min(1).max(200).nullable().optional(),
+          pi: z.string().trim().min(1).max(200).nullable().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   resources: z
     .object({
       maxParallel: z.number().int().min(1).max(16).optional(),
       maxMonitoringSessions: z.number().int().min(0).max(16).optional(),
       monitoringWakeIntervalMinutes: z.number().int().min(1).max(60).nullable().optional(),
+      autoResumeOnUsageLimit: z.boolean().optional(),
       memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
       worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
     })
@@ -81,10 +116,16 @@ export type SetWorkspaceConfigInput = z.infer<typeof setWorkspaceConfigInputSche
 
 // ---- GUI prefs — the two open bags ----------------------------------------------------------
 
-/** Settings → Appearance: accent + density. ONE shape for both ui-state files. */
+/** Settings → Appearance: accent + density + reading width. ONE shape for both ui-state files. */
 const appearanceSchema = z.object({
   accent: z.enum(['lime', 'violet']).optional(),
   density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
+  width: z.enum(['narrow', 'wide']).optional(),
+});
+
+const taskTableUiStateSchema = z.looseObject({
+  /** Explicit user choices only. Missing ids keep the registry-owned default. */
+  expandedColumns: z.record(z.string(), z.boolean()).optional(),
 });
 
 /**
@@ -102,8 +143,13 @@ const appearanceSchema = z.object({
  * listed it, which made it wider than the route.
  */
 export const uiStateSchema = z.looseObject({
+  /** What the last started run used. `null` is a VALUE, not an absence: it records a run that
+   *  chose neither a skill nor a workflow (the plain built-in `quick-task`), which the composer
+   *  can now express since the source picker grew an empty state. Absent still means "no
+   *  run has been recorded here" — a cockpit reading either one selects nothing. */
   lastTask: z
     .object({ source: z.enum(['workflow', 'skill']), ref: z.string() })
+    .nullable()
     .optional(),
   /** Most-recently-run sources, newest first (deduped, capped). Feeds the composer picker's
    *  recency sort. */
@@ -159,9 +205,11 @@ export const workspaceLastLocationSchema = z.strictObject({
 export type WorkspaceLastLocation = z.infer<typeof workspaceLastLocationSchema>;
 
 export const workspaceUiStateSchema = z.looseObject({
-  /** The sidebar's per-project collapse map (step 3.3) — `true` collapses a group, `false` pins
-   *  it open, absent means the default (the active project expands, the rest collapse). Loose for
-   *  the same round-trip reason as its parent. */
+  /** LEGACY — the sidebar's per-project collapse map (step 3.3). Still accepted and still
+   *  round-tripped so an older cockpit sharing this home keeps working, but the current cockpit
+   *  neither reads nor writes it: which groups are shut describes the WINDOW, not the workspace,
+   *  so it lives in that browser's localStorage (`packages/web/src/lib/sidebar-collapse.ts`).
+   *  One shared answer meant a phone collapsing a group collapsed it on the desktop too. */
   sidebar: z
     .looseObject({ collapsed: z.record(z.string(), z.boolean()).optional() })
     .optional(),
@@ -173,6 +221,7 @@ export const workspaceUiStateSchema = z.looseObject({
       claude: z.string().optional(),
       codex: z.string().optional(),
       opencode: z.string().optional(),
+      pi: z.string().optional(),
     })
     .optional(),
   /** Settings → Appearance, GLOBAL since step 3.5: accent + density describe the person at the
@@ -181,8 +230,12 @@ export const workspaceUiStateSchema = z.looseObject({
   /** Settings → Notifications, GLOBAL since step 3.5 — one answer for the whole workspace, since
    *  the delivering browser is one browser whichever project you are looking at. */
   notifications: z.looseObject({ enabled: z.boolean().optional() }).optional(),
-  /** Last settled project-scoped page. Used only when entering at the exact bare root;
-   *  explicit deep links always win. */
+  /** Desktop Tasks-table density, shared across every project in this workspace. */
+  taskTable: taskTableUiStateSchema.optional(),
+  /** LEGACY, exactly like `sidebar` above — the last settled project-scoped page, restored when
+   *  entering at the exact bare root. The shape is unchanged and still accepted, but the current
+   *  cockpit keeps it in localStorage (`packages/web/src/lib/last-location.ts`): stored here, the
+   *  last client to navigate decided where every OTHER client's next launch landed. */
   lastLocation: workspaceLastLocationSchema.optional(),
   /** The user's curated selection of default (vendor) skills. Tri-state: ABSENT means "not
    *  curated", so every default skill shows; a PRESENT array (even `[]`) means only those names
@@ -190,6 +243,60 @@ export const workspaceUiStateSchema = z.looseObject({
   importedSkills: z.array(z.string()).optional(),
 });
 export type WorkspaceUiState = z.infer<typeof workspaceUiStateSchema>;
+
+const WORKSPACE_UI_STATE_MAX_KEYS = 200;
+const TASK_TABLE_MAX_COLUMNS = 50;
+
+/**
+ * `PUT /api/v1/workspace/ui-state` body. The response remains an open, tolerant bag so data from
+ * a newer cockpit survives an older server; this write-side schema adds bounded known fields so
+ * the current cockpit cannot grow the user-owned file without limit.
+ */
+export const setWorkspaceUiStateInputSchema = z
+  .looseObject({
+    ...workspaceUiStateSchema.shape,
+    sidebar: z
+      .looseObject({
+        collapsed: z
+          .record(z.string().min(1).max(64), z.boolean())
+          .refine((map) => Object.keys(map).length <= WORKSPACE_UI_STATE_MAX_KEYS, {
+            message: `sidebar.collapsed must have at most ${WORKSPACE_UI_STATE_MAX_KEYS} entries`,
+          })
+          .optional(),
+      })
+      .optional(),
+    dismissedProviderAuthFailures: z
+      .strictObject({
+        claude: z.string().min(1).max(128).optional(),
+        codex: z.string().min(1).max(128).optional(),
+        opencode: z.string().min(1).max(128).optional(),
+        pi: z.string().min(1).max(128).optional(),
+      })
+      .optional(),
+    importedSkills: z
+      .array(z.string().min(1).max(200))
+      .max(WORKSPACE_UI_STATE_MAX_KEYS)
+      .optional(),
+    taskTable: taskTableUiStateSchema
+      .extend({
+        expandedColumns: z
+          .record(z.string().min(1).max(64), z.boolean())
+          .refine((map) => Object.keys(map).length <= TASK_TABLE_MAX_COLUMNS, {
+            message: `taskTable.expandedColumns must have at most ${TASK_TABLE_MAX_COLUMNS} entries`,
+          })
+          .optional(),
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (Object.keys(data).length > WORKSPACE_UI_STATE_MAX_KEYS) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `ui-state has too many keys (max ${WORKSPACE_UI_STATE_MAX_KEYS})`,
+      });
+    }
+  });
+export type SetWorkspaceUiStateInput = z.infer<typeof setWorkspaceUiStateInputSchema>;
 
 // ---- per-repo agent knobs (`GET/PUT /api/v1/config`) ----------------------------------------
 
@@ -201,6 +308,7 @@ export const runnerModelsSchema = z.object({
   claude: z.string().optional(),
   codex: z.string().optional(),
   opencode: z.string().optional(),
+  pi: z.string().optional(),
 });
 export type RunnerModels = z.infer<typeof runnerModelsSchema>;
 
@@ -247,6 +355,7 @@ export const setConfigInputSchema = z.object({
       claude: z.string().trim().max(200).nullable().optional(),
       codex: z.string().trim().max(200).nullable().optional(),
       opencode: z.string().trim().max(200).nullable().optional(),
+      pi: z.string().trim().max(200).nullable().optional(),
     })
     .optional(),
   maxParallel: z.number().int().min(1).max(16).optional(),
@@ -329,6 +438,11 @@ export const providerStatusSchema = z.object({
   enabled: z.boolean().optional(),
   hint: z.string().optional(),
   authFailureId: z.string().optional(),
+  /** Which agent account this row describes (spec 2026-07-29-agent-profiles). ABSENT on
+   *  `GET /api/v1/providers/status`, which deliberately keeps answering exactly one row per
+   *  provider — the discovered default — so an older client sees no change at all. Per-account
+   *  rows are carried by `GET /api/v1/workspace/agent-profiles` instead. */
+  profileId: z.string().optional(),
 });
 export type ProviderStatus = z.infer<typeof providerStatusSchema>;
 
@@ -349,6 +463,22 @@ export type ProviderConnectResponse = z.infer<typeof providerConnectResponseSche
 
 // ---- host model catalog (`GET /api/v1/models`) -----------------------------------------------
 
+/**
+ * The runners whose model list is discovered from the host rather than hard-coded: Codex
+ * through its app-server protocol, OpenCode through its own `models` listing (#794). Claude has
+ * no equivalent local source, so its picker keeps static presets and `GET /api/v1/models`
+ * rejects it. One definition, used by the route's query validator and by the cockpit's picker.
+ */
+export const modelDiscoveryRunnerSchema = z.enum(['codex', 'opencode']);
+export type ModelDiscoveryRunner = z.infer<typeof modelDiscoveryRunnerSchema>;
+export const MODEL_DISCOVERY_RUNNERS: readonly ModelDiscoveryRunner[] =
+  modelDiscoveryRunnerSchema.options;
+
+/** True when `runner` has a host-discovered catalog (and therefore a `/models` answer). */
+export function runnerDiscoversModels(runner: Runner): runner is ModelDiscoveryRunner {
+  return (MODEL_DISCOVERY_RUNNERS as readonly string[]).includes(runner);
+}
+
 export const runnerModelOptionSchema = z.object({
   id: z.string(),
   label: z.string(),
@@ -356,8 +486,9 @@ export const runnerModelOptionSchema = z.object({
 });
 export type RunnerModelOption = z.infer<typeof runnerModelOptionSchema>;
 
-/** `GET /api/v1/models?runner=codex` — discovered models, plus how fresh the answer is. Never an
- *  error: an unavailable CLI degrades to `source: 'unavailable'` with a `reason`. */
+/** `GET /api/v1/models?runner=codex|opencode` — the models discovered from that runner's own
+ *  host installation, plus how fresh the answer is. Never an error: an unavailable CLI degrades
+ *  to `source: 'unavailable'` with a `reason`. Claude has no host-local catalog and is rejected. */
 export const runnerModelCatalogResponseSchema = z.object({
   runner: runnerSchema,
   models: z.array(runnerModelOptionSchema),
@@ -384,3 +515,24 @@ export const openTargetsResponseSchema = z.object({
   targets: z.array(openTargetSchema),
 });
 export type OpenTargetsResponse = z.infer<typeof openTargetsResponseSchema>;
+
+/**
+ * `POST /api/v1/open-in` — open THIS PROJECT'S root in a detected app (Settings → the project
+ * folder row). The path is never sent: it is the scoped project's own registered root, resolved
+ * server-side, so the route has no traversal surface at all. `target` is an
+ * `/api/v1/open-targets` id; unlike the run route there is no `default`/`cli:` handling, because
+ * a repo root is a directory and an agent CLI belongs in a task worktree.
+ */
+export const openProjectInSchema = z.object({
+  // A short bound (#429): matched against a downstream allowlist, so an app id is never long.
+  target: z.string().trim().min(1, 'target required').max(200),
+});
+export type OpenProjectInRequest = z.infer<typeof openProjectInSchema>;
+
+/** The 200 for the above — `opened` is a literal because every failure is a 409 with `{ error }`,
+ *  so a `false` would be unreachable and would only invite a client to branch on it. */
+export const openProjectInResponseSchema = z.object({
+  opened: z.literal(true),
+  path: z.string(),
+});
+export type OpenProjectInResponse = z.infer<typeof openProjectInResponseSchema>;

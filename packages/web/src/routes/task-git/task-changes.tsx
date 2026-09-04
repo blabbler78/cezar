@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router'
 
 import { ApiError, createRunPr, getRunFile, openRunFileInApp, openRunInCli, pushRun, runFileRawUrl } from '@/api/client'
-import { queryKeys, useHealth, useRun, useRunChanges } from '@/api/queries'
+import { queryKeys, useHealth, useRepo, useRun, useRunChanges } from '@/api/queries'
 import type { ApiRun } from '@open-mercato/cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffHandle, type DiffMode } from '@/components/diff'
@@ -41,6 +41,10 @@ export function TaskChangesRoute() {
 
 function ChangesView({ run }: { run: ApiRun }) {
   const health = useHealth()
+  // The remote that decides whether Push is offered comes from the PROJECT-scoped `/repo`, not
+  // from `/api/health.repo`: health is bound to the boot folder, so a cezar booted outside a git
+  // repo reported no remote for every project (#791).
+  const repo = useRepo()
   // Poll while the run is active so writes appear as the agent makes them.
   const changes = useRunChanges(run.id, isRunActive(run.status))
   const desktop = useIsDesktop()
@@ -103,7 +107,7 @@ function ChangesView({ run }: { run: ApiRun }) {
     hasWorktree: Boolean(run.worktreePath) && !changesRefused,
     branch: run.branch,
     changedFiles: changes.data?.stat.files,
-    remote: health.data?.repo?.remote,
+    remote: repo.data?.info?.remote,
     forge: health.data?.forge ?? null,
     localHandoff: health.data?.capabilities.localHandoff ?? false,
     hasSession: lastSessionId(run) !== undefined,
@@ -161,7 +165,7 @@ function ChangesView({ run }: { run: ApiRun }) {
       {changes.data?.repointedHead ? (
         <p data-slot="repointed-head-note" className="border-b px-4 py-2 text-xs text-soft-foreground md:px-6">
           HEAD is on <code>{changes.data.repointedHead.headBranch}</code>, not this task&apos;s branch{' '}
-          <code>{changes.data.repointedHead.taskBranch}</code> — showing uncommitted changes only.
+          <code>{changes.data.repointedHead.taskBranch}</code> — showing only what this task changed there.
         </p>
       ) : null}
 
@@ -187,8 +191,16 @@ function ChangesView({ run }: { run: ApiRun }) {
         />
       ) : (
         <div className="flex min-h-0 flex-1 items-start gap-5 px-4 py-4 [--diff-sticky-top:10rem] md:px-6">
-          {/* The tree column: sticky under the header so long diffs scroll beside it. */}
-          <aside className="sticky top-40 hidden w-60 shrink-0 md:block lg:w-72">
+          {/* The tree column: sticky under the header so long diffs scroll beside it, and its OWN
+              scroller. Sticky alone is not enough — a tree taller than the viewport grows the page
+              instead, so the only way to reach its last file was to drag the shared `main` scroller
+              (and the diff with it) to the bottom. Capping the pane at the space left under the
+              sticky chrome gives the list its own scrollbar; `overscroll-contain` keeps a wheel
+              inside it from chaining into the diff once it bottoms out. */}
+          <aside
+            data-slot="changes-tree-pane"
+            className="sticky top-40 hidden max-h-[calc(100dvh_-_var(--diff-sticky-top)_-_1rem)] w-60 shrink-0 overflow-y-auto overscroll-contain md:block lg:w-72"
+          >
             <ChangesTree root={tree} selected={selected} onSelect={selectFile} />
           </aside>
           <Diff

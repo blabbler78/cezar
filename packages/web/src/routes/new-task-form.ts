@@ -1,8 +1,10 @@
+import { runnerDiscoversModels } from '@open-mercato/cezar-api-client'
 import type {
   BackendCheck,
   CreateRunInput,
   CreateRunResponse,
-  ImageInput,
+  AttachmentInput,
+  ModelDiscoveryRunner,
   Runner,
   RunnerModelCatalogResponse,
   Skill,
@@ -20,6 +22,11 @@ import type {
 /** What the composer runs: a named workflow or a single skill. The same shape the server's
  *  `ui-state.json` stores as `lastTask`, so persistence needs no mapping. */
 export type TaskSource = NonNullable<UiState['lastTask']>
+
+/** The zero-config built-in: one agent step that runs the prompt. It is what a task with NO
+ *  source picked runs as, which is why the composer's picker does not also offer it as a
+ *  workflow row — "No skill" and "quick-task" would be two names for one run. */
+export const QUICK_TASK = 'quick-task'
 
 /** Prepend `source` to the recency list (newest first), dropping any earlier occurrence of the
  *  same source+ref, and cap the length. Pure so the picker's recency sort is table-testable. */
@@ -44,6 +51,7 @@ export const RUNNERS: readonly RunnerOption[] = [
   { id: 'claude', label: 'claude', desc: 'Claude Code CLI' },
   { id: 'codex', label: 'codex', desc: 'OpenAI Codex (app-server)' },
   { id: 'opencode', label: 'opencode', desc: 'OpenCode (serve)' },
+  { id: 'pi', label: 'pi', desc: 'pi CLI (provider/model)' },
 ]
 
 export interface ModelPreset {
@@ -52,9 +60,11 @@ export interface ModelPreset {
   desc: string
 }
 
-/** Static model presets per runner. `id: ''` is always "auto" —
- *  no model flag, the runner decides. Claude takes tier aliases + pinned versions; Codex takes
- *  Codex entries are supplied by host discovery; OpenCode takes `provider/model` ids. */
+/** Static model presets per runner. `id: ''` is always "auto" — no model flag, the runner
+ *  decides. Claude takes tier aliases + pinned versions, the only runner with no host-local
+ *  catalog to ask. Codex and OpenCode list `auto` alone: their entries come from discovery
+ *  (`runnerDiscoversModels`), because a hard-coded list is stale the moment the host's provider
+ *  ships a model — which is exactly what #794 reported for OpenCode. */
 export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   claude: [
     { id: '', label: 'auto', desc: 'Pick the best model per step' },
@@ -71,12 +81,26 @@ export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   ],
   opencode: [
     { id: '', label: 'auto', desc: 'Use your OpenCode default model' },
+  ],
+  // pi selects a model with the same `provider/model` convention as opencode.
+  pi: [
+    { id: '', label: 'auto', desc: 'Use your pi default model' },
     { id: 'anthropic/claude-opus-4-8', label: 'claude-opus-4.8', desc: 'via Anthropic' },
     { id: 'anthropic/claude-sonnet-5', label: 'claude-sonnet-5', desc: 'via Anthropic' },
     { id: 'openai/gpt-5.1', label: 'gpt-5.1', desc: 'via OpenAI' },
-    { id: 'openai/gpt-5.1-codex', label: 'gpt-5.1-codex', desc: 'via OpenAI' },
   ],
 }
+
+/** Runners that pick with the canonical `provider/model` convention and span every provider the
+ *  host has configured, so an id they list is never EXCLUSIVE to them: pi offers
+ *  `openai/gpt-5.1` as a preset and OpenCode serves the very same model from the very same
+ *  provider. Their presets are therefore skipped when judging another runner's id.
+ *
+ *  This is the cockpit's half of the rule the server states structurally — a runner with no
+ *  default provider cannot be contradicted, which is why `KNOWN_PRESETS_BY_RUNNER.pi` is empty
+ *  in `packages/cezar/src/core/model-presets.ts`. Without it, adding pi's presets here would
+ *  silently strip a pinned OpenCode model from the OpenCode picker. */
+const PROVIDER_SPANNING_RUNNERS: readonly Runner[] = ['opencode', 'pi']
 
 /** Keep recognized presets from another backend out of a runner's custom-model escape hatch
  * (#480).
@@ -85,7 +109,9 @@ export function modelConflictsWithRunner(model: string, runner: Runner): boolean
   if (!model || MODELS_BY_RUNNER[runner].some((preset) => preset.id === model)) return false
   return Object.entries(MODELS_BY_RUNNER).some(
     ([other, presets]) =>
-      other !== runner && presets.some((preset) => preset.id !== '' && preset.id === model),
+      other !== runner &&
+      !PROVIDER_SPANNING_RUNNERS.includes(other as Runner) &&
+      presets.some((preset) => preset.id !== '' && preset.id === model),
   )
 }
 
@@ -96,7 +122,7 @@ export function modelsForRunner(
 ): readonly ModelPreset[] {
   const base = [...(MODELS_BY_RUNNER[runner] ?? MODELS_BY_RUNNER.claude)]
   const seen = new Set(base.map((model) => model.id))
-  if (runner === 'codex') {
+  if (runnerDiscoversModels(runner)) {
     for (const model of catalog?.models ?? []) {
       if (!model.id || seen.has(model.id)) continue
       seen.add(model.id)
@@ -114,14 +140,21 @@ export function modelsForRunner(
   return base
 }
 
+/** How each discovery runner is named in the picker's status line. */
+const DISCOVERY_RUNNER_LABEL: Record<ModelDiscoveryRunner, string> = {
+  codex: 'Codex',
+  opencode: 'OpenCode',
+}
+
 export function modelCatalogStatus(
   runner: Runner,
   catalog: RunnerModelCatalogResponse | undefined,
   failed = false,
 ): string | undefined {
-  if (runner !== 'codex') return undefined
-  if (catalog?.stale) return 'Using cached Codex model list'
-  if (failed || catalog?.source === 'unavailable') return 'Latest Codex models unavailable'
+  if (!runnerDiscoversModels(runner)) return undefined
+  const name = DISCOVERY_RUNNER_LABEL[runner]
+  if (catalog?.stale) return `Using cached ${name} model list`
+  if (failed || catalog?.source === 'unavailable') return `Latest ${name} models unavailable`
   return undefined
 }
 
@@ -187,23 +220,29 @@ export function sourceExists(
 }
 
 /**
- * The effective source: the first candidate that still exists (the draft pick, then the
- * persisted `lastTask`), else the zero-config cold default: built-in quick-task.
+ * The effective source: the draft's own pick when the catalog still has it, else NOTHING.
+ *
+ * `null` is the composer's empty state — no skill and no workflow — and it is what `/new` now
+ * opens on. Two mechanisms were removed here, both deliberately:
+ *
+ *  - the persisted `lastTask` no longer preselects. It was load-bearing for one thing: the
+ *    picker remembering a way of working across visits. It also meant a skill picked once sat
+ *    in the pill for every task afterwards, with no way out that reads as one (the composer
+ *    offered no deselect at all — the only exit was picking the `quick-task` WORKFLOW, which
+ *    is what this change is a fix for). `lastTask` is still WRITTEN, so an older cockpit reading
+ *    the same `ui-state.json` behaves exactly as it always did.
+ *  - the cold quick-task/first-skill fallback chain is gone with it: `null` says "nothing is
+ *    selected" honestly, and `buildCreateRunBody` is the one place that turns that into the
+ *    plain built-in run the server performs.
+ *
+ * The existence check stays: a skill deleted since it was drafted must not stay in the pill.
  */
 export function resolveSource(
-  candidates: ReadonlyArray<TaskSource | null | undefined>,
+  candidate: TaskSource | null | undefined,
   skills: readonly Skill[],
   workflows: readonly WorkflowDef[],
-): TaskSource {
-  for (const candidate of candidates) {
-    if (candidate && sourceExists(candidate, skills, workflows)) return candidate
-  }
-  if (workflows.some((workflow) => workflow.name === 'quick-task')) {
-    return { source: 'workflow', ref: 'quick-task' }
-  }
-  const firstSkill = skills[0]
-  if (firstSkill) return { source: 'skill', ref: firstSkill.name }
-  return { source: 'workflow', ref: workflows[0]?.name ?? 'quick-task' }
+): TaskSource | null {
+  return candidate && sourceExists(candidate, skills, workflows) ? candidate : null
 }
 
 /**
@@ -211,6 +250,10 @@ export function resolveSource(
  *  - a skill runs as a one-step inline chain (spec 008's API — the same shape the inbox and
  *    the bookmarklet auto-start use): `steps: [{ id: 'task', name, skill, prompt: '{{task}}' }]`;
  *  - a workflow goes by name;
+ *  - NO source (`null` — the composer's empty state) goes by the built-in `quick-task` name,
+ *    because `POST /runs` requires exactly one of `workflow`/`steps`. That name is also what
+ *    the server resolves an inbox/bookmarklet run to, so "nothing selected" and "quick-task
+ *    selected" are the same run, which is exactly why the picker offers only one of them;
  *  - an explicit/sticky `runner` always rides the request; an untouched runner is omitted only
  *    when it equals the active project's known default (unknown defaults and connected fallbacks
  *    stay explicit);
@@ -218,7 +261,8 @@ export function resolveSource(
  */
 export function buildCreateRunBody(opts: {
   task: string
-  source: TaskSource
+  /** `null` — nothing picked — runs the built-in `quick-task`. */
+  source: TaskSource | null
   model: string
   /** Native coding-agent settings stay visible, but a locked model is never a request override. */
   modelsLocked?: boolean
@@ -226,8 +270,11 @@ export function buildCreateRunBody(opts: {
   /** True when the draft contains a sticky/user runner choice rather than an untouched default. */
   runnerExplicit?: boolean
   defaultRunner?: Runner
+  /** Per-task agent account (spec 2026-07-29-agent-profiles) — the composer's override of the
+   *  project's own selection, applying to `runner`. Absent/empty follows the project. */
+  agentProfile?: string | null
   variants: number
-  images: readonly ImageInput[]
+  images: readonly AttachmentInput[]
   /** false → run in the repo working tree, no worktree (single runs only). Sent only when
    *  explicitly off; the default (isolated worktree) stays implicit. */
   worktree?: boolean
@@ -249,6 +296,7 @@ export function buildCreateRunBody(opts: {
     runner,
     runnerExplicit,
     defaultRunner,
+    agentProfile,
     variants,
     images,
     worktree,
@@ -258,11 +306,14 @@ export function buildCreateRunBody(opts: {
   } = opts
   return {
     task,
-    ...(source.source === 'skill'
+    ...(source?.source === 'skill'
       ? { steps: [{ id: 'task', name: source.ref, skill: source.ref, prompt: '{{task}}' }] }
-      : { workflow: source.ref }),
+      : { workflow: source?.ref ?? QUICK_TASK }),
     model: modelsLocked ? undefined : model || undefined,
     runner: runnerOverride(runner, defaultRunner, runnerExplicit),
+    // Sent only when the user picked one — an absent key is "follow the project", which is what
+    // every launch that never touched the control means.
+    agentProfile: agentProfile || undefined,
     variants: variants > 1 ? variants : undefined,
     images: images.length > 0 ? [...images] : undefined,
     // Off only matters for a single run — variants always isolate.

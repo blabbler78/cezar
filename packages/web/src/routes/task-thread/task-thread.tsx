@@ -1,5 +1,5 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router'
 
 import { Link } from '@/lib/project-router'
@@ -7,6 +7,7 @@ import { Link } from '@/lib/project-router'
 import { ApiError } from '@/api/client'
 import {
   useEditQueuedMessage,
+  useMarkRunSeen,
   usePatchRun,
   useRemoveQueuedMessage,
   useRun,
@@ -14,28 +15,19 @@ import {
   useRuns,
   useSendMessage,
 } from '@/api/queries'
-import { useRunEvents } from '@/api/run-events'
+import { useRunHistory, type RunHistoryState } from '@/api/run-history'
 import type { ApiRun } from '@open-mercato/cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Composer } from '@/components/composer/composer'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
+import { isUnread } from '@/lib/read-state'
 import { taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
 
-import {
-  AssistantMessage,
-  ContextGroup,
-  ImageItem,
-  NoteLine,
-  ProviderAuthRequiredCard,
-  ReasoningItem,
-  ToolCard,
-  ToolStreak,
-  UserBubble,
-  WorkingIndicator,
-} from './thread-items'
+import { AutoResumeHint } from './auto-resume-hint'
+import { WorkingIndicator } from './thread-items'
 import { useContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
@@ -47,17 +39,21 @@ import { RunHeader } from './run-header'
 import { AskCard } from './ask-card'
 import { useRunRecordReconcile } from './run-reconcile'
 import { useActiveProviderAvailability } from './active-provider'
-import { groupThreadItems, type ThreadBlock } from './thread-groups'
 import { ThreadLoading } from './thread-loading'
-import { ThreadCardCache } from './thread-open-cards'
 import { threadRenderMode } from './thread-scroll'
-import { JumpToLatestPill, ThreadRows, useThreadScroll, type ThreadRow } from './thread-scroller'
+import { JumpToLatestPill, useThreadScroll } from './thread-scroller'
+import {
+  SessionTranscript,
+  buildTranscriptRows,
+  mainTranscriptSections,
+  type TranscriptMessageActions,
+} from './session-transcript'
 import {
   latestPlanEntries,
   reduceThread,
   threadFilePaths,
   threadFooter,
-  type ThreadEntry,
+  type ThreadAsk,
   type ThreadState,
 } from './thread-state'
 
@@ -67,20 +63,61 @@ import {
  * dim lifecycle lines, the closed footer, and the docked composer (plan dock · paused hint ·
  * reply box).
  *
- * Data doctrine: `useRun` (fetch) is authoritative for the record — status, title, error;
- * `useRunEvents` (SSE replay + live) is the transcript. The reducer folds the full event list
- * on each change; the rendered rows go through the threshold-switched scroller
+ * Data doctrine: `useRun` is authoritative for the record; `useRunHistory` hydrates a bounded
+ * visible transcript plus compact current-state context and falls back to `useRunEvents` when
+ * the optimized route is unavailable. The rendered rows go through the threshold-switched scroller
  * (thread-scroller.tsx — flat + content-visibility below ~300 rows, virtua above).
  */
 export function TaskThreadRoute() {
   const { id } = useParams<{ id: string }>()
   const run = useRun(id)
-  const events = useRunEvents(id)
-  const thread = useMemo(() => reduceThread(events), [events])
+  const history = useRunHistory(id)
+  const runStatus = run.data?.status
+  const thread = useMemo(
+    () => reduceThread(history.visibleEvents, { activeTurn: runStatus === 'running' }),
+    [history.visibleEvents, runStatus],
+  )
+  const currentThread = useMemo(
+    () => reduceThread(history.currentEvents, { activeTurn: runStatus === 'running' }),
+    [history.currentEvents, runStatus],
+  )
+
+  // Read receipt (#unread-done-items): opening a finished task's thread marks it read — the same
+  // "opening the mail clears the unread dot" move. Gated on `isUnread` so it fires only for a
+  // genuinely-unread done item, and keyed on the record's read-relevant fields so it converges:
+  // the optimistic `seenAt` flips `isUnread` false and the effect does not re-fire. A run that
+  // later resumes and re-finishes (its `finishedAt` moves past the receipt) marks read again.
+  //
+  // The one exception is "Mark unread" from this very thread (#775): clearing the receipt makes
+  // `isUnread` true again, which without a guard this effect would immediately undo — the action
+  // would look broken in exactly the place a user reaches for it. `suppressAutoRead` is that
+  // guard, and it holds the run id rather than a bare boolean so the reset is implicit: it only
+  // suppresses the run it was set for, and the FIRST render of a later visit (a fresh mount, or
+  // navigating to another task and back) starts from an empty ref and auto-reads normally. That
+  // is the email grammar this is modelled on — reopening the mail marks it read again.
+  const suppressAutoRead = useRef<string | undefined>(undefined)
+  const suppressAutoReadFor = useCallback((runId: string) => {
+    suppressAutoRead.current = runId
+  }, [])
+  const { mutate: markRunSeen } = useMarkRunSeen()
+  useEffect(() => {
+    if (!run.data) return
+    if (suppressAutoRead.current === run.data.id) return
+    if (isUnread(run.data)) markRunSeen(run.data.id)
+  }, [
+    markRunSeen,
+    run.data?.id,
+    run.data?.status,
+    run.data?.finishedAt,
+    run.data?.seenAt,
+    // `isUnread` reads `archived` too, so it belongs here: un-archiving an open thread makes the
+    // run unread again, and without this dep the effect would never fire to clear it.
+    run.data?.archived,
+  ])
   // The two feeds can drift: a record update lost on the workspace stream leaves the thread
   // showing Working… over a "run finished" transcript. The transcript is live here, so it
   // arbitrates — a session end with no session after it refetches a record still claiming one.
-  useRunRecordReconcile(run.data, events)
+  useRunRecordReconcile(run.data, history.visibleEvents)
 
   if (run.isPending) return <ThreadLoading />
 
@@ -107,89 +144,41 @@ export function TaskThreadRoute() {
     )
   }
 
-  return <ThreadView run={run.data} thread={thread} />
-}
+  if (history.isPending) return <ThreadLoading />
 
-/**
- * The run's task + every turn, flattened to keyed rows for the threshold-switched scroller
- * (thread-scroll.ts owns the rule). Row keys are turn-scoped — the same keys the open-card
- * cache uses, because v2 item ids repeat across sessions.
- */
-export function buildThreadRows(
-  run: ApiRun,
-  thread: ThreadState,
-  /** Queued-run affordances (#472). Omitted (the default) renders every bubble read-only,
-   *  which is what every caller outside the live thread view wants. */
-  edit?: {
-    onEditTask: (text: string) => Promise<void>
-    onEditMessage: (msgId: string, text: string) => Promise<void>
-    onRemoveMessage: (msgId: string) => Promise<void>
-  },
-): ThreadRow[] {
-  const rows: ThreadRow[] = []
-  // The initial prompt: the engine writes no v1 `user-message` line for it — the task on
-  // the run record IS that message, so it renders from there, not from an invented event.
-  if (run.task)
-    rows.push({
-      key: 'task',
-      node: (
-        <UserBubble
-          text={run.task}
-          images={run.taskImages ?? []}
-          // Editable but never removable: a run with no prompt is not a run.
-          onEdit={edit ? edit.onEditTask : undefined}
-          editLabel="Edit the prompt"
-        />
-      ),
-    })
-  // Messages stacked onto the run while it waits for a slot (#472). Same provenance as the
-  // task bubble — they live on the record, not in the event stream, and the engine writes no
-  // `user-message` line for them (they are folded into the prompt, not sent as turns). So
-  // rendering them here is what keeps the thread showing exactly one bubble per authored
-  // message, before the run starts and after.
-  for (const message of run.queuedMessages ?? []) {
-    rows.push({
-      key: `queued:${message.id}`,
-      node: (
-        <UserBubble
-          text={message.text}
-          images={message.images ?? []}
-          onEdit={edit ? (text) => edit.onEditMessage(message.id, text) : undefined}
-          onRemove={edit ? () => edit.onRemoveMessage(message.id) : undefined}
-        />
-      ),
-    })
-  }
-  for (const turn of thread.turns) {
-    if (turn.userMessage) {
-      rows.push({
-        key: `${turn.id}:user`,
-        node: (
-          <UserBubble
-            text={turn.userMessage.text}
-            imageCount={turn.userMessage.imageCount}
-            images={turn.userMessage.images}
-          />
-        ),
-      })
-    }
-    for (const block of groupThreadItems(turn.items)) {
-      rows.push({
-        key: `${turn.id}:${block.id}`,
-        node: <ThreadBlockView block={block} scope={turn.id} run={run} />,
-      })
-    }
-  }
-  return rows
+  return (
+    <ThreadView
+      run={run.data}
+      thread={thread}
+      currentThread={currentThread}
+      history={history}
+      onMarkedUnread={suppressAutoReadFor}
+    />
+  )
 }
 
 /** The loaded thread. The header owns its own data hooks (mutations, the runs list); the
  *  thread body stays presentational — tests drive it with reduced fixture states directly. */
-export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }) {
+export function ThreadView({
+  run,
+  thread,
+  currentThread = thread,
+  history,
+  onMarkedUnread,
+}: {
+  run: ApiRun
+  thread: ThreadState
+  currentThread?: ThreadState
+  history?: RunHistoryState
+  /** Passed straight through to the header's "Mark unread" (#775) so the route can suppress its
+   *  auto-mark-read effect. Optional: every test that drives this view with a fixture, and the
+   *  header's other three tabs, have no such effect to suppress. */
+  onMarkedUnread?: (runId: string) => void
+}) {
   const footer = threadFooter(run.status, run.error)
   // The dock's data: the latest plan snapshot across turns (full replacement — an emptied
   // plan hides the dock and the header mirror alike).
-  const plan = latestPlanEntries(thread)
+  const plan = latestPlanEntries(currentThread)
   const planTally = plan !== undefined && plan.length > 0 ? planCounts(plan) : undefined
   // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
   // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
@@ -219,7 +208,10 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // added: anything that is neither live nor still queued is closed. `review` matters most —
   // it is where this pipeline's runs normally END, and `threadFooter` already calls it closed.
   const runIsTerminal = !sessionOpen && run.status !== 'queued'
-  const agents = useMemo(() => collectSubagents(thread.turns, runIsTerminal), [thread.turns, runIsTerminal])
+  const agents = useMemo(
+    () => collectSubagents(currentThread.turns, runIsTerminal),
+    [currentThread.turns, runIsTerminal],
+  )
   // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
   // sub-agents have no stable identity outside their run, so there is nothing to persist.
   const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
@@ -233,12 +225,15 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // Resolved from the turns, NOT from `agents`: the dock can yield to the transcript (Q6)
   // while a sheet is open, and that must not slam the panel shut mid-read.
   const openAgent = useMemo(
-    () => (openAgentId === undefined ? undefined : findSubagent(thread.turns, openAgentId, runIsTerminal)),
-    [thread.turns, openAgentId, runIsTerminal],
+    () =>
+      openAgentId === undefined ?
+        undefined
+      : findSubagent(currentThread.turns, openAgentId, runIsTerminal),
+    [currentThread.turns, openAgentId, runIsTerminal],
   )
   const openAgentChildren = useMemo(
-    () => (openAgentId === undefined ? [] : subagentChildren(thread.turns, openAgentId)),
-    [thread.turns, openAgentId],
+    () => (openAgentId === undefined ? [] : subagentChildren(currentThread.turns, openAgentId)),
+    [currentThread.turns, openAgentId],
   )
   const sendMessage = useSendMessage(run.id)
   const activeProvider = useActiveProviderAvailability(run)
@@ -273,27 +268,63 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
     [queued, patchRunAsync, editQueuedAsync, removeQueuedAsync],
   )
 
-  const rows = useMemo(() => buildThreadRows(run, thread, edit), [run, thread, edit])
+  const sections = useMemo(() => mainTranscriptSections(run, thread), [run, thread])
+  const rows = useMemo(() => buildTranscriptRows(sections, run.id), [sections, run.id])
+  const renderAsk = useCallback((ask: ThreadAsk) => <AskCard ask={ask} run={run} />, [run])
+  const messageActions = useMemo<Readonly<Record<string, TranscriptMessageActions>> | undefined>(() => {
+    if (edit === undefined) return undefined
+    const actions: Record<string, TranscriptMessageActions> = {
+      task: { onEdit: edit.onEditTask, editLabel: 'Edit the prompt' },
+    }
+    for (const message of run.queuedMessages ?? []) {
+      actions[`queued:${message.id}`] = {
+        onEdit: (text) => edit.onEditMessage(message.id, text),
+        onRemove: () => edit.onRemoveMessage(message.id),
+      }
+    }
+    return actions
+  }, [edit, run.queuedMessages])
   // #526: the footer's issue link may be synthesized from the CEZ:ISSUE marker, and the only
   // repository it may ever name is the one on screen — never the transcript's.
   const issueUrl = taskIssueUrl(run, useProjectRepoBase())
   const { search } = useLocation()
   const mode = threadRenderMode(search, rows.length)
-  const scroll = useThreadScroll(run.id)
+  const scroll = useThreadScroll(`${run.id}:main`, {
+    onLoadOlder: history?.hasOlder ? history.loadOlder : undefined,
+    onJumpToLatest: history?.jumpToLatest,
+    rowKeys: rows.map(({ key }) => key),
+  })
   // The iOS keyboard lifts the dock via `--kb`; once it settles, a pinned reader re-pins
   // (research §7: re-run scrollToEnd after the viewport settles).
   useKeyboardInsetVar(scroll.restickIfStuck)
 
   return (
-    <div data-route="task-thread" className="flex min-h-full flex-col">
-      <RunHeader run={run} planTally={planTally} />
+    <div data-route="task-thread" data-run-id={run.id} className="flex min-h-full flex-col">
+      <RunHeader run={run} planTally={planTally} onMarkedUnread={() => onMarkedUnread?.(run.id)} />
 
       {/* Row spacing lives on each thread row (pb-2.5, both render modes measure alike);
           this gap only separates the sections — rows, empty state, footer, review panel. */}
       <div className="mx-auto flex w-full max-w-[var(--measure)] flex-1 flex-col gap-2.5 px-3 py-3 md:gap-3.5 md:px-6 md:py-5">
-        <ThreadCardCache runId={run.id}>
-          <ThreadRows runId={run.id} rows={rows} mode={mode} controls={scroll} />
-        </ThreadCardCache>
+        {history ? (
+          <HistoryBoundary
+            hasOlder={history.hasOlder}
+            loading={history.isFetchingOlder}
+            error={history.olderError}
+            fallback={history.fallback}
+            retainedPages={history.retainedPages}
+            onLoad={scroll.loadOlder}
+          />
+        ) : null}
+        <SessionTranscript
+          runId={run.id}
+          viewId="main"
+          sections={sections}
+          mode="document"
+          renderAsk={renderAsk}
+          messageActions={messageActions}
+          scrollControls={scroll}
+          renderMode={mode}
+        />
 
         {thread.turns.length === 0 ? (
           run.status === 'queued' ? (
@@ -360,16 +391,15 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
       <AcceptCelebration status={run.status} />
 
       {/* The drill-down for whichever Agents-dock row was clicked. Rendered outside the dock
-          so the sheet's portal is not affected by the dock's collapse state — but inside its
-          own card cache (module-level and run-keyed, so this is the SAME store the thread
-          uses), or tool cards expanded in the sheet would forget that on reopen. */}
-      <ThreadCardCache runId={run.id}>
-        <SubagentSheet
-          agent={openAgent}
-          entries={openAgentChildren}
-          onClose={() => setOpenAgentId(undefined)}
-        />
-      </ThreadCardCache>
+          so the sheet's portal is not affected by the dock's collapse state. SessionTranscript
+          owns the shared run-keyed card cache, so expanded sheet cards survive a reopen. */}
+      <SubagentSheet
+        runId={run.id}
+        renderAsk={renderAsk}
+        agent={openAgent}
+        entries={openAgentChildren}
+        onClose={() => setOpenAgentId(undefined)}
+      />
 
       {/* The dock region (mockup `.dock`): plan dock, paused hint, then the composer.
           `bottom: var(--kb)` is the iOS keyboard lift — 0 until the visualViewport watcher
@@ -393,6 +423,10 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
             // Keyed by run id: the collapse default re-derives per task (see PlanDock).
             <PlanDock key={run.id} runId={run.id} entries={plan} />
           ) : null}
+
+          {/* A usage-limit stop is the one `failed` state that is still going somewhere — the
+              dock says so before the composer offers a Continue nobody needs to press. */}
+          <AutoResumeHint run={run} />
 
           {run.status === 'waiting' ? (
             <div
@@ -456,6 +490,63 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   )
 }
 
+function HistoryBoundary({
+  hasOlder,
+  loading,
+  error,
+  fallback,
+  retainedPages,
+  onLoad,
+}: {
+  hasOlder: boolean
+  loading: boolean
+  error?: string
+  fallback: boolean
+  retainedPages: number
+  onLoad: () => void
+}) {
+  if (fallback) {
+    return (
+      <p data-slot="history-fallback" className="text-center text-xs text-soft-foreground" role="status">
+        Progressive history is unavailable; showing the complete session.
+      </p>
+    )
+  }
+  if (!hasOlder && !error) {
+    return (
+      <div data-slot="history-start" className="flex items-center gap-3 text-[11px] text-soft-foreground">
+        <span aria-hidden className="h-px flex-1 bg-border" />
+        Start of session
+        <span aria-hidden className="h-px flex-1 bg-border" />
+      </div>
+    )
+  }
+  return (
+    <div
+      data-slot="history-boundary"
+      data-retained-pages={retainedPages}
+      aria-busy={loading}
+      className="flex min-h-8 items-center justify-center text-xs text-muted-foreground"
+    >
+      <button
+        type="button"
+        onClick={onLoad}
+        disabled={loading}
+        className="rounded-md px-3 py-1.5 font-medium hover:bg-muted disabled:cursor-wait"
+      >
+        {loading ?
+          'Loading 100 earlier items…'
+        : error ?
+          'Couldn’t load earlier items · Retry'
+        : 'Load 100 earlier items'}
+      </button>
+      <span className="sr-only" aria-live="polite">
+        {loading ? 'Loading earlier session history' : error ? error : ''}
+      </span>
+    </div>
+  )
+}
+
 /** The queued run's honest empty state (legacy #351): a queued run has emitted nothing, so
  *  instead of a blank thread the placeholder names the parked state and its live position in
  *  the FIFO queue (from the runs list — the same feed the sidebar uses). */
@@ -473,51 +564,4 @@ function QueuedPlaceholder({ run }: { run: ApiRun }) {
       </p>
     </div>
   )
-}
-
-/** One grouped block → its surface. Grouping (context groups, streaks, sub-agent nesting) is
- *  `groupThreadItems`'s — this only maps block kinds to components. `scope` (the turn's render
- *  key) namespaces the open-card cache keys, because item ids repeat across sessions. */
-function ThreadBlockView({ block, scope, run }: { block: ThreadBlock; scope: string; run: ApiRun }) {
-  switch (block.kind) {
-    case 'entry':
-      return <ThreadEntryView entry={block.entry} scope={scope} run={run} />
-    case 'tool-card':
-      return <ToolCard item={block.item} nested={block.children} cacheKey={`${scope}:${block.id}`} />
-    case 'context-group':
-      return <ContextGroup group={block} scope={scope} />
-    case 'streak':
-      return (
-        <ToolStreak count={block.count}>
-          {block.blocks.map((inner) => (
-            <ThreadBlockView key={inner.id} block={inner} scope={scope} run={run} />
-          ))}
-        </ToolStreak>
-      )
-  }
-}
-
-/** One reducer entry → its block (non-tool entries; tools always arrive as tool-card blocks). */
-function ThreadEntryView({ entry, scope, run }: { entry: ThreadEntry; scope: string; run: ApiRun }) {
-  switch (entry.kind) {
-    case 'message':
-      // Agent-side user echoes (some backends emit them) read as user bubbles too.
-      return entry.role === 'assistant' ? (
-        <AssistantMessage text={entry.text} />
-      ) : (
-        <UserBubble text={entry.text} />
-      )
-    case 'reasoning':
-      return <ReasoningItem text={entry.text} />
-    case 'tool':
-      return <ToolCard item={entry} cacheKey={`${scope}:${entry.id}`} />
-    case 'note':
-      return <NoteLine note={entry} />
-    case 'image':
-      return <ImageItem image={entry} />
-    case 'ask':
-      return <AskCard ask={entry} run={run} />
-    case 'provider-auth-required':
-      return <ProviderAuthRequiredCard incident={entry} />
-  }
 }

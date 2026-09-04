@@ -17,6 +17,10 @@ export interface NewTaskDraft {
   text: string
   source: TaskSource | null
   runner: Runner | null
+  /** Per-task agent account (spec 2026-07-29-agent-profiles). `null` = follow the project's own
+   *  selection, which is what every draft that never touched the control means. Sticky like the
+   *  other pickers — which login a repo's work runs under is a way of working, not a whim. */
+  agentProfile: string | null
   model: string | null
   variants: number
   /** The `Start | Plan first` toggle (#383). Sticky like the pickers: plan-first is a way of
@@ -69,10 +73,32 @@ export function resolveComposerRunMode(input: ComposerRunModeInput): {
   return { autonomous, worktree }
 }
 
+/**
+ * The `/new` header's one-line answer to "where will this run land?" (#793).
+ *
+ * Derived from the RESOLVED run mode, never assumed. The header used to print the isolation
+ * line unconditionally, so it was simply false whenever the Worktree chip was unchecked — or,
+ * as in #791, not rendered at all — and it is the first thing a user reads when trying to work
+ * out where their run went. Three states, because they send the user to three different places
+ * to find their changes.
+ *
+ * Takes the resolved `worktree` rather than the draft so it cannot disagree with the chip:
+ * `resolveComposerRunMode` already folds in the variants constraint, the explicit opt-out, the
+ * interactive-skill recommendation and the workspace default. `hasGit` only distinguishes
+ * "opted out" from "there is no repository here", which is the difference between a warning
+ * and an explanation.
+ */
+export function composerRunModeNote(input: { worktree: boolean; hasGit: boolean }): string {
+  if (input.worktree) return 'Runs in an isolated worktree — review everything before it lands.'
+  if (input.hasGit) return 'Runs in the repo working tree — your checkout is modified directly.'
+  return 'Runs in place — no git repository detected, so there is no worktree to isolate in.'
+}
+
 const EMPTY: NewTaskDraft = {
   text: '',
   source: null,
   runner: null,
+  agentProfile: null,
   model: null,
   variants: 1,
   planFirst: false,
@@ -106,6 +132,7 @@ function normalize(raw: unknown): NewTaskDraft {
     text: typeof obj.text === 'string' ? obj.text : '',
     source: isSource(obj.source) ? obj.source : null,
     runner: typeof obj.runner === 'string' ? (obj.runner as Runner) : null,
+    agentProfile: typeof obj.agentProfile === 'string' ? obj.agentProfile : null,
     model: typeof obj.model === 'string' ? obj.model : null,
     variants: obj.variants === 2 || obj.variants === 3 ? obj.variants : 1,
     planFirst: obj.planFirst === true,
@@ -155,10 +182,15 @@ export function writeDraft(next: NewTaskDraft, projectId: string | null = null):
   }
 }
 
-/** After a successful submit: the text is spent, the picker choices remain — the next task
- *  usually runs the same way (legacy keeps its pills too). */
-export function clearDraftText(projectId: string | null = null): void {
-  writeDraft({ ...readDraft(projectId), text: '' }, projectId)
+/** After a successful submit: the text is spent AND the source resets to nothing.
+ *
+ *  The runner/model/variants/plan-first pills stay — those are a way of working, and the next
+ *  task usually runs the same way (legacy keeps its pills too). A SKILL is not: it is a
+ *  decision about the task that just started, and carrying it into the next one is how a skill
+ *  picked once ended up silently running every task after it. A fresh `/new` starts with no
+ *  skill; picking one again is one click. */
+export function clearStartedDraft(projectId: string | null = null): void {
+  writeDraft({ ...readDraft(projectId), text: '', source: null }, projectId)
 }
 
 /** Test isolation — drop EVERY project's cache and stored draft, so the next read re-consults

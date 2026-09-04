@@ -1,7 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { loadWorkspaceConfig } from './workspace/config.ts';
+import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.ts';
+import { RUNNER_IDS } from './core/agent-runner.ts';
 
 /**
  * Optional advanced config at `.ai/cezar/config.json`. Zero-config rule:
@@ -53,7 +54,7 @@ const configSchema = z.object({
    * step (workflow). The GUI only offers runners actually installed; this is
    * the preselected default. Also the runner the chain planner uses.
    */
-  defaultRunner: z.enum(['claude', 'codex', 'opencode']).default('claude'),
+  defaultRunner: z.enum(RUNNER_IDS).default('claude'),
   /** Model for the chain planner (spec 008) — cheap but reliable at JSON. */
   plannerModel: z.string().min(1).default('sonnet'),
   /** Model for the task namer (spec 2026-07-17-task-auto-naming) — the cheapest
@@ -94,6 +95,7 @@ const configSchema = z.object({
       claude: z.string().trim().min(1).max(200).optional(),
       codex: z.string().trim().min(1).max(200).optional(),
       opencode: z.string().trim().min(1).max(200).optional(),
+      pi: z.string().trim().min(1).max(200).optional(),
     })
     .optional()
     .catch(undefined),
@@ -107,21 +109,56 @@ const configSchema = z.object({
 
 export type CezConfig = z.infer<typeof configSchema>;
 
-/** Read `.ai/cezar/config.json` on demand — never cached, never throws. */
+/**
+ * Fold the machine-wide agent defaults under a repo's own config (spec 2026-07-29-agent-profiles).
+ *
+ * Applied to the RAW object, before parsing, for the reason `ownWorktreeRetention` documents just
+ * below: `defaultRunner`'s `.default('claude')` materializes the key, so after a parse there is no
+ * telling "the user chose claude" from "the user said nothing". Merging first keeps the wire shape
+ * exactly as it has always been — `defaultRunner` and the model presets stay always-present — while
+ * making an absent key mean "ask the machine".
+ *
+ * A repo key always wins, and `models` merges per RUNNER rather than wholesale: pinning claude's
+ * model in one repo must not silently discard the machine's codex preset.
+ */
+function withMachineDefaults(raw: unknown, machine: WorkspaceConfig['agentDefaults']): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = {};
+  const own = raw as Record<string, unknown>;
+  const ownModels = own.defaultModels && typeof own.defaultModels === 'object'
+    ? own.defaultModels as Record<string, unknown>
+    : undefined;
+  const models = { ...machine.models, ...ownModels };
+  return {
+    ...own,
+    ...(own.defaultRunner === undefined && machine.runner !== undefined
+      ? { defaultRunner: machine.runner }
+      : {}),
+    ...(Object.keys(models).length > 0 ? { defaultModels: models } : {}),
+  };
+}
+
+/**
+ * Read `.ai/cezar/config.json` on demand — never cached, never throws.
+ *
+ * Also reads the machine-wide defaults, which is one more small JSON read and deliberately not
+ * cached for the same reason this one is not: `~/.cezar/` is shared by every cezar process on the
+ * machine, so a snapshot is a staleness bug.
+ */
 export async function loadConfig(repoRoot: string): Promise<CezConfig> {
+  const machine = (await loadWorkspaceConfig()).agentDefaults;
   let raw: string;
   try {
     raw = await readFile(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8');
   } catch {
-    return configSchema.parse({});
+    return configSchema.parse(withMachineDefaults({}, machine));
   }
   try {
-    const parsed = configSchema.safeParse(JSON.parse(raw));
+    const parsed = configSchema.safeParse(withMachineDefaults(JSON.parse(raw), machine));
     if (parsed.success) return parsed.data;
   } catch {
     // fall through — malformed JSON degrades to the default
   }
-  return configSchema.parse({});
+  return configSchema.parse(withMachineDefaults({}, machine));
 }
 
 /**

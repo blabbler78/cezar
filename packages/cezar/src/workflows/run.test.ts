@@ -299,6 +299,52 @@ describe('RunManager.recordTurnEnd', () => {
     expect(later?.diffStat).toEqual({ adds: 4, dels: 1, files: 3 });
   });
 
+  /**
+   * #751: `recordTurnEnd` is the ONE place `RunRecord.diffStat` is written, so it
+   * is also the one place `run.branch` has to reach `worktreeShortstat` — without
+   * it, a review/QA run that checked another branch out into its worktree stores
+   * that branch's whole diff as this task's work.
+   */
+  it('stores only the uncommitted diff when the agent repointed the worktree HEAD', async () => {
+    const record = await makeWorktreeRun();
+    const wt = record.worktreePath as string;
+
+    // A branch with real commits on it, checked out into the task's worktree —
+    // exactly what a `review/pr-NNN` or QA run does.
+    await run('git', ['checkout', '-q', '-b', 'someone-elses-branch'], { cwd: wt });
+    writeFileSync(join(wt, 'theirs.txt'), 'a\nb\nc\nd\ne\nf\n'); // 6 lines that are NOT this task's
+    await run('git', ['add', '-A'], { cwd: wt });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'their work'], { cwd: wt });
+    writeFileSync(join(wt, 'mine.txt'), 'z\n'); // the 1 line this task produced
+
+    await manager.recordTurnEnd(record.id, TURN_TEXT);
+
+    // 1 uncommitted line, flagged — not the 6 committed ones the foreign branch carries
+    // (which, with `a.txt`'s edit and `new.txt`, would have read `+10 −1 / 4 files`).
+    expect(store.getRun(record.id)?.diffStat).toEqual({
+      adds: 1,
+      dels: 0,
+      files: 1,
+      repointed: true,
+    });
+  });
+
+  it('drops the repointed flag again once HEAD returns to the task branch', async () => {
+    const record = await makeWorktreeRun();
+    const wt = record.worktreePath as string;
+    await run('git', ['checkout', '-q', '-b', 'a-detour'], { cwd: wt });
+    await manager.recordTurnEnd(record.id, TURN_TEXT);
+    expect(store.getRun(record.id)?.diffStat?.repointed).toBe(true);
+
+    // `updateRun` replaces `diffStat` wholesale, so a stale `repointed: true` can
+    // never outlive the repoint that caused it.
+    await run('git', ['checkout', '-q', record.branch as string], { cwd: wt });
+    await manager.recordTurnEnd(record.id, TURN_TEXT);
+    const after = store.getRun(record.id);
+    expect(after?.diffStat).toEqual({ adds: 3, dels: 1, files: 2 });
+    expect(after?.diffStat).not.toHaveProperty('repointed');
+  });
+
   it('never overwrites a user-edited title (PATCH sets titleSummary too)', async () => {
     const record = await makeWorktreeRun();
     // What PATCH /api/v1/runs/:id does on a rename:
@@ -507,6 +553,82 @@ describe('RunManager.continueRun override', () => {
     const id = resumableRun();
     expect(manager.continueRun(id, { model: 'my-custom-alias' })).toEqual({ ok: true });
     expect(store.getRun(id)?.model).toBe('my-custom-alias');
+  });
+
+  /* Agent accounts (spec 2026-07-29-agent-profiles): a follow-up may switch login as well as
+     backend — and a session id only resolves inside the config dir that created it. */
+
+  it('persists the picked account as the run current one', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { agentProfile: 'klaudiusz' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.agentProfile).toBe('klaudiusz');
+    // Nothing else moves: the account is its own axis.
+    expect(store.getRun(id)?.runner).toBe('claude');
+    expect(store.getRun(id)?.model).toBe('sonnet');
+  });
+
+  it('starts fresh when Continue switches to another login of the same agent', () => {
+    const id = resumableRun();
+    store.updateStep(id, 's1', { backend: 'claude', profileId: 'default' });
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
+
+    expect(manager.continueRun(id, { agentProfile: 'klaudiusz' })).toEqual({ ok: true });
+    // `claude --resume <id>` under another login would find nothing and silently open a fresh
+    // conversation, so the session id is deliberately not passed.
+    expect(calls[0]?.[2]).toBeUndefined();
+    expect(calls[0]?.[3]).toBe('claude');
+  });
+
+  it('resumes when the picked account is the one that owns the session', () => {
+    const id = resumableRun();
+    store.updateStep(id, 's1', { backend: 'claude', profileId: 'klaudiusz' });
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
+
+    expect(manager.continueRun(id, { agentProfile: 'klaudiusz' })).toEqual({ ok: true });
+    expect(calls[0]?.[2]).toBe('sess-1');
+  });
+
+  it('treats a step that recorded no account as the discovered one', () => {
+    // Pre-accounts sessions ran under whatever `agentHomePaths()` finds, so re-picking `default`
+    // is not a switch and must still resume.
+    const id = resumableRun();
+    store.updateStep(id, 's1', { backend: 'claude' });
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
+
+    expect(manager.continueRun(id, { agentProfile: 'default' })).toEqual({ ok: true });
+    expect(calls[0]?.[2]).toBe('sess-1');
+  });
+
+  it('an omitted account preserves the one the run is on (backward compat)', () => {
+    const id = resumableRun();
+    store.updateRun(id, { agentProfile: 'klaudiusz' });
+    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.agentProfile).toBe('klaudiusz');
+  });
+
+  it('a runner switch drops the previous agent account instead of carrying it over', () => {
+    // An account belongs to ONE agent: a claude login says nothing about which codex account
+    // should run, and leaving it on the record would re-apply it if a later Continue switched back.
+    const id = resumableRun();
+    store.updateRun(id, { agentProfile: 'klaudiusz' });
+    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.agentProfile).toBeUndefined();
+  });
+
+  it('keeps the account when the continuation stays on the same agent', () => {
+    const id = resumableRun();
+    store.updateRun(id, { agentProfile: 'klaudiusz' });
+    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.agentProfile).toBe('klaudiusz');
   });
 
   it('refuses to continue a run with no resumable session (no override persisted)', () => {
@@ -841,6 +963,45 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     expect(state?.idleTimer).toBeUndefined(); // durable monitors do not inherit the 15-minute user-wait timer
   }, 30_000);
 
+  /**
+   * #810 — the regression the two 0.9.2 reports describe. #661 removed the 15-minute
+   * idle timer from the monitoring branch and replaced it with a wake timer that
+   * defaulted OFF, so a zero-config parked monitor had NO timer at all and cezar has no
+   * other resume path (no process-exit callback, no CI webhook, no sub-agent-completion
+   * event). It sat in `monitoring` until a human typed something. A default manager must
+   * therefore publish a wake deadline: the run has to be able to resume itself.
+   */
+  it('a parked monitor schedules its own re-check under the zero-config default (#810)', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.activity === 'monitoring');
+    await waitFor(record.id, (r) => Boolean(r?.monitoringWakeAt));
+    const parked = store.getRun(record.id);
+    const deadline = Date.parse(String(parked?.monitoringWakeAt));
+    expect(Number.isNaN(deadline)).toBe(false);
+    expect(deadline).toBeGreaterThan(Date.now()); // a real future re-check, not a stale stamp
+    const state = (manager as unknown as {
+      active: Map<string, { idleTimer?: NodeJS.Timeout; monitoringWakeTimer?: NodeJS.Timeout }>;
+    }).active.get(record.id);
+    expect(state?.monitoringWakeTimer).toBeDefined();
+    expect(state?.idleTimer).toBeUndefined(); // still no user-wait timeout — #661's fix stands
+  }, 30_000);
+
+  it('park mode remains reachable as an explicit operator choice (#810)', async () => {
+    manager.dispose();
+    manager = new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { monitoringWakeIntervalMinutes: null } }),
+    });
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.activity === 'monitoring');
+    expect(store.getRun(record.id)?.monitoringWakeAt).toBeUndefined();
+    const state = (manager as unknown as {
+      active: Map<string, { monitoringWakeTimer?: NodeJS.Timeout }>;
+    }).active.get(record.id);
+    expect(state?.monitoringWakeTimer).toBeUndefined();
+  }, 30_000);
+
   it('optionally wakes a parked monitor without fabricating a user message', async () => {
     manager.dispose();
     const semaphore = new WorkspaceSemaphore({ initial: { monitoringWakeIntervalMinutes: 0.001 } });
@@ -974,6 +1135,22 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
     expect(v1Text.some((e) => String(e.text).includes('CEZ:ASK'))).toBe(false);
   }, 30_000);
 
+  it('normalizes a near-valid presentation-only marker into exactly one ask card', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-near choose', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const events = readEvents(record.id);
+    const asks = events.filter((event) => event.type === 'ask.requested');
+    expect(asks).toHaveLength(1);
+    const questions = asks[0]!.questions as Array<{
+      header: string;
+      options: Array<{ label: string; description?: string }>;
+    }>;
+    expect(questions[0]!.header).toBe('Implementati');
+    expect(questions[0]!.options[0]).toEqual({ label: 'Minimal', description: 'd'.repeat(280) });
+    expect(events.filter((event) => event.type === 'text').some((event) => String(event.text).includes('CEZ:ASK'))).toBe(false);
+  }, 30_000);
+
   it('a markerless turn-end raises no ask.requested', async () => {
     const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
     currentId = record.id;
@@ -988,7 +1165,9 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
     const parked = store.getRun(record.id);
     expect(parked?.status).toBe('waiting'); // still parks — never worse than the prose fallback
     expect(parked?.activity).toBeUndefined();
-    expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
+    const events = readEvents(record.id);
+    expect(events.some((e) => e.type === 'ask.requested')).toBe(false);
+    expect(events.filter((e) => e.type === 'note' && String(e.message).includes('not valid JSON'))).toHaveLength(1);
   }, 30_000);
 
   // Regression (blank-question bug): valid JSON that fails the ask schema used
@@ -1002,17 +1181,18 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const events = readEvents(record.id);
     expect(events.some((e) => e.type === 'ask.requested')).toBe(false);
+    expect(events.filter((e) => e.type === 'note' && String(e.message).includes('failed validation'))).toHaveLength(1);
     const assistantText = events.filter((e) => e.type === 'text');
     expect(assistantText.some((e) => String(e.text).includes('CEZ:ASK {"questions":[]}'))).toBe(true);
   }, 30_000);
 });
 
 /**
- * #472 — `persistImage` must work with no `ActiveRun`, because a queued run has
+ * #472 — `persistAttachment` must work with no `ActiveRun`, because a queued run has
  * none. The counter moved to `RunManager.queuedImageSeq`, seeded from the highest
  * numeric suffix on disk rather than the file count.
  */
-describe('RunManager.persistImage without a session (#472)', () => {
+describe('RunManager.persistAttachment without a session (#472)', () => {
   let repoRoot: string;
   let store: RunStore;
   let manager: RunManager;
@@ -1025,7 +1205,7 @@ describe('RunManager.persistImage without a session (#472)', () => {
     namePrefix?: string,
   ) => { name: string; url: string; path: string } | null;
   const persist = (id: string, prefix?: string) =>
-    (manager as unknown as { persistImage: PersistFn }).persistImage(id, 'image/png', PNG, prefix);
+    (manager as unknown as { persistAttachment: PersistFn }).persistAttachment(id, 'image/png', PNG, prefix);
   const imagesDir = (id: string) => join(repoRoot, '.ai/cezar', 'runs', `${id}-images`);
 
   beforeEach(() => {
@@ -1503,6 +1683,31 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
     ]);
   });
 
+  /**
+   * #950 — the re-read branches on the NAME, not on the list. A `.pdf` sitting in the same
+   * `images` list as a screenshot must come back as a path only: re-encoding it into a base64
+   * image block would compose a message no backend can accept, and would put the whole document
+   * into the prompt on the one path (restart) where nobody is watching.
+   */
+  it('never re-encodes a non-image attachment into an image block on restart', () => {
+    const r = store.createRun({ title: 't', workflow: 'w', task: 'read the brief', steps: [] });
+    const dir = join(repoRoot, '.ai/cezar', 'runs', `${r.id}-images`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'pasted-1.png'), 'the-task-bytes');
+    writeFileSync(join(dir, 'pasted-2.pdf'), '%PDF-1.4 the-document-bytes');
+    store.updateRun(r.id, {
+      taskImages: [
+        `/api/v1/runs/${r.id}/images/pasted-1.png`,
+        `/api/v1/runs/${r.id}/images/pasted-2.pdf`,
+      ],
+    });
+
+    const images = hydrate(r.id, r.task).images;
+    expect(images).toHaveLength(1);
+    expect(images?.[0]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } });
+    expect(JSON.stringify(images)).not.toContain(Buffer.from('%PDF-1.4 the-document-bytes').toString('base64'));
+  });
+
   /** Degrade, never fail the boot (AGENTS.md). */
   it('skips an unreadable attachment, notes it, and still starts', () => {
     const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
@@ -1512,6 +1717,17 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
     expect(hydrated.task).toBe('look at this\n\nsee the mock');
     expect(hydrated.stackedImages).toBeUndefined();
     expect(store.readEvents(r.id).some((e) => e.type === 'note' && String(e.message).includes('gone-1.png'))).toBe(true);
+  });
+
+  /** A file has no bytes to fail on — it is only ever `stat`ed — so it needs its own case: a
+   *  deleted `.md` must be dropped and noted, not handed to the agent as a path to nothing. */
+  it('notes a non-image attachment whose file is gone instead of naming a dead path', () => {
+    const r = store.createRun({ title: 't', workflow: 'w', task: 'read the brief', steps: [] });
+    stack(r.id, { text: 'see the brief', images: [`/api/v1/runs/${r.id}/images/pasted-7.md`] });
+
+    const hydrated = hydrate(r.id, r.task);
+    expect(hydrated.stackedImages).toBeUndefined();
+    expect(store.readEvents(r.id).some((e) => e.type === 'note' && String(e.message).includes('pasted-7.md'))).toBe(true);
   });
 });
 
@@ -1700,4 +1916,237 @@ describe('native Codex requestUserInput parks and resumes the run (#565)', () =>
     await waitFor(() => readFileSync(eventsPath, 'utf8').includes('"type":"turn-end"'));
     expect(store.getRun(record.id)?.status).toBe('waiting');
   }, 30_000);
+});
+
+/**
+ * #811 — registry `/skill` expansion on the CONTINUATION path.
+ *
+ * `expandRegistrySlashSkill` (#676) reads `state.skills`, which only `execute` ever
+ * populated. `runContinuation` builds its OWN `ActiveRun`, so a Reply into a finished
+ * run — and every restart recovery, which routes through `continueRun` — expanded
+ * against an empty registry and handed the raw `/om-...` to the backend, which answered
+ * "Unknown skill". Two seams have to hold: the continuation's opening prompt (the
+ * session's `userPrompt`, which never passes through `deliverMessage`) and the
+ * follow-ups delivered into that same session.
+ *
+ * The mock CLI echoes the prompt it received (`Okay — looking into: …`), so the
+ * transcript is a faithful witness of what actually reached the backend.
+ */
+describe('registry /skill expansion survives a continuation (#811)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let runId: string | undefined;
+  let savedDryRun: string | undefined;
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-811-'));
+    savedDryRun = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar/skills'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.ai/cezar/skills/demo-review.md'),
+      '---\nname: demo-review\ndescription: Review a diff.\n---\n\nRun the demo review playbook.\n',
+    );
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    runId = undefined;
+  });
+
+  afterEach(() => {
+    if (runId) manager.cancel(runId);
+    if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = savedDryRun;
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const eventsOf = (id: string) =>
+    readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.ndjson`), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type: string; text?: string; stepId?: string });
+
+  const waitFor = async (predicate: () => boolean, ms = 20_000) => {
+    const deadline = Date.now() + ms;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+
+  /** A finished run, ready for the cockpit's Reply composer. The dry-run mock ends its
+   *  turn with no marker, so the run parks at `waiting` with the session open — closing
+   *  it is what a user pressing Finish does, and `continueRun` only accepts a run that
+   *  reached a terminal status. */
+  const finishedRun = async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'do the first thing', worktree: false });
+    runId = record.id;
+    await waitFor(() => store.getRun(record.id)?.status === 'waiting');
+    expect(manager.finish(record.id)).toBe(true);
+    await waitFor(() => ['done', 'review'].includes(store.getRun(record.id)?.status ?? ''));
+    return record.id;
+  };
+
+  it("expands the continuation's OPENING prompt before it becomes the session userPrompt", async () => {
+    const id = await finishedRun();
+    expect(manager.continueRun(id, { text: '/demo-review look at the diff' })).toEqual({ ok: true });
+    await waitFor(() =>
+      eventsOf(id).some((e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into')),
+    );
+
+    const echoed = eventsOf(id).find(
+      (e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into'),
+    );
+    // The backend saw the expanded skill prompt, NOT a bare slash command it would
+    // reject as an unknown skill.
+    expect(echoed?.text).toContain('Selected skill: /demo-review');
+    expect(echoed?.text).not.toContain('/demo-review look at the diff');
+
+    // Delivery-only: the transcript still shows what the user actually typed.
+    const typed = eventsOf(id).find((e) => e.type === 'user-message' && e.stepId === 'continue-1');
+    expect(typed?.text).toBe('/demo-review look at the diff');
+  }, 40_000);
+
+  it('expands a FOLLOW-UP delivered into the reopened continuation session', async () => {
+    const id = await finishedRun();
+    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    await waitFor(() => store.getRun(id)?.status === 'waiting');
+
+    expect(manager.sendMessage(id, [{ type: 'text', text: '/demo-review now review it' }])).toBe(true);
+    await waitFor(() =>
+      eventsOf(id).filter((e) => e.type === 'text' && e.text?.includes('Selected skill: /demo-review')).length > 0,
+    );
+    expect(
+      eventsOf(id).some((e) => e.type === 'text' && e.text?.includes('Selected skill: /demo-review')),
+    ).toBe(true);
+  }, 40_000);
+
+  it('leaves an unknown slash command untouched so backend-native commands still work', async () => {
+    const id = await finishedRun();
+    expect(manager.continueRun(id, { text: '/compact please' })).toEqual({ ok: true });
+    await waitFor(() =>
+      eventsOf(id).some((e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into')),
+    );
+    const echoed = eventsOf(id).find(
+      (e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into'),
+    );
+    expect(echoed?.text).toContain('/compact please');
+  }, 40_000);
+});
+
+/**
+ * #278 — registry `/skill` expansion on a FRESH run's OPENING prompt.
+ *
+ * A task STARTED with `/om-...` as its first message is delivered straight to
+ * `startSession` inside `execute`, never through `deliverMessage`, and #811 only
+ * patched the continuation seam. So the opening prompt leaked the raw slash to the
+ * backend, which answered "Unknown command" even though Cezar lists the skill.
+ *
+ * The mock CLI echoes the prompt it received (`Okay — looking into: …`), so the
+ * transcript is a faithful witness of what actually reached the backend.
+ */
+describe("registry /skill expansion on a fresh run's opening prompt (#278)", () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let runId: string | undefined;
+  let savedDryRun: string | undefined;
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-278-'));
+    savedDryRun = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar/skills'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.ai/cezar/skills/demo-review.md'),
+      '---\nname: demo-review\ndescription: Review a diff.\n---\n\nRun the demo review playbook.\n',
+    );
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    runId = undefined;
+  });
+
+  afterEach(() => {
+    if (runId) manager.cancel(runId);
+    if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = savedDryRun;
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  // Tolerant of the pre-first-event window: the run's ndjson does not exist until
+  // the engine writes its first event, and this describe polls events directly
+  // (no store-status gate first), so a missing file is simply "no events yet".
+  const eventsOf = (id: string) => {
+    let raw: string;
+    try {
+      raw = readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.ndjson`), 'utf8').trim();
+    } catch {
+      return [] as { type: string; text?: string; stepId?: string }[];
+    }
+    if (!raw) return [] as { type: string; text?: string; stepId?: string }[];
+    return raw.split('\n').map((line) => JSON.parse(line) as { type: string; text?: string; stepId?: string });
+  };
+
+  const waitFor = async (predicate: () => boolean, ms = 20_000) => {
+    const deadline = Date.now() + ms;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+
+  it('expands the opening prompt before it reaches the backend', async () => {
+    const record = manager.startRun(SINGLE_STEP, {
+      task: '/demo-review look at the diff',
+      worktree: false,
+    });
+    runId = record.id;
+    await waitFor(() =>
+      eventsOf(record.id).some(
+        (e) => e.stepId === 'task' && e.type === 'text' && e.text?.includes('looking into'),
+      ),
+    );
+
+    const echoed = eventsOf(record.id).find(
+      (e) => e.stepId === 'task' && e.type === 'text' && e.text?.includes('looking into'),
+    );
+    // The backend saw the expanded skill prompt, NOT the bare slash command it would
+    // reject as an unknown command.
+    expect(echoed?.text).toContain('Selected skill: /demo-review');
+    expect(echoed?.text).not.toContain('/demo-review look at the diff');
+  }, 40_000);
+
+  it('leaves an unknown slash command untouched so backend-native commands still work', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: '/compact please', worktree: false });
+    runId = record.id;
+    await waitFor(() =>
+      eventsOf(record.id).some(
+        (e) => e.stepId === 'task' && e.type === 'text' && e.text?.includes('looking into'),
+      ),
+    );
+    const echoed = eventsOf(record.id).find(
+      (e) => e.stepId === 'task' && e.type === 'text' && e.text?.includes('looking into'),
+    );
+    expect(echoed?.text).toContain('/compact please');
+  }, 40_000);
 });

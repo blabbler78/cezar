@@ -9,9 +9,11 @@ import {
   formatMem,
   githubRepoBase,
   prNumber,
+  scheduledResume,
   taskReference,
   taskPrUrl,
   taskIssueUrl,
+  taskReferences,
   usageCells,
   workflowLabel,
 } from '@/lib/tasks-table'
@@ -50,6 +52,34 @@ describe('formatMem', () => {
   for (const [input, expected] of cases) {
     it(`${input} → "${expected}"`, () => expect(formatMem(input)).toBe(expected))
   }
+})
+
+describe('scheduledResume', () => {
+  const NOW = new Date('2026-08-03T19:00:00.000Z')
+  const scheduled = (autoResumeAt?: string) =>
+    scheduledResume(run({ status: 'failed', autoResumeAt }), NOW)
+
+  it('is the clock time alone for an appointment later the same day', () => {
+    const answer = scheduled('2026-08-03T19:33:53.000Z')
+    // Locale-formatted, so assert the SHAPE rather than a fixed spelling: a bare time, no date.
+    expect(answer?.label).toMatch(/^\d{1,2}[:.]\d{2}(\s?[AP]M)?$/)
+    expect(answer?.title).toContain('Resumes automatically at')
+  })
+
+  it('puts a short date in front once the appointment is not today', () => {
+    const answer = scheduled('2026-08-05T07:15:00.000Z')
+    expect(answer?.label).not.toMatch(/^\d{1,2}[:.]\d{2}(\s?[AP]M)?$/)
+    expect(answer?.label.length).toBeGreaterThan(5)
+  })
+
+  it('is undefined without a live schedule, and for a stamp it cannot read', () => {
+    expect(scheduled(undefined)).toBeUndefined()
+    // A row must never print `Invalid Date` beside the word "scheduled".
+    expect(scheduled('not-a-date')).toBeUndefined()
+    // Only a FAILED run is waiting on one — a running record with a stale stamp is not.
+    expect(scheduledResume(run({ status: 'running', autoResumeAt: '2026-08-03T19:33:53.000Z' }), NOW))
+      .toBeUndefined()
+  })
 })
 
 describe('formatCost', () => {
@@ -210,6 +240,135 @@ describe('taskPrUrl', () => {
       referencedPullRequestUrl: 'https://github.com/o/r/pull/454',
     })
     expect(taskPrUrl(r)).toBe('https://github.com/o/r/pull/900')
+  })
+})
+
+describe('taskReferences', () => {
+  const REPO = 'https://github.com/o/r'
+
+  it('returns every reference a task has, strongest first', () => {
+    // The real multi-reference case: a review task opened on an issue, ABOUT one PR, having
+    // created another. All three are true at once.
+    expect(
+      taskReferences(
+        run({
+          pullRequestUrl: `${REPO}/pull/533`,
+          referencedPullRequestUrl: `${REPO}/pull/530`,
+          referencedIssueUrl: `${REPO}/issues/524`,
+          markerRefs: { pr: 530, issue: 524 },
+        }),
+      ),
+    ).toEqual([
+      { kind: 'PR', number: 533, url: `${REPO}/pull/533` },
+      { kind: 'PR', number: 530, url: `${REPO}/pull/530` },
+      { kind: 'Issue', number: 524, url: `${REPO}/issues/524` },
+    ])
+  })
+
+  // The record this rule was written from, verbatim: the task declared the PR it opened (#901),
+  // while the created-PR field had been poisoned with a PR from ANOTHER repository that the
+  // transcript merely quoted. The declared one leads — including on the surfaces with room for
+  // exactly one chip, which is where the wrong PR was all you could see.
+  it('leads with a declared PR that no scraped URL corroborates', () => {
+    const r = run({
+      pullRequestUrl: 'https://github.com/o/other/pull/5366',
+      prNumber: 901,
+      markerRefs: { pr: 901 },
+    })
+    expect(taskReferences(r, REPO)).toEqual([
+      { kind: 'PR', number: 901, url: `${REPO}/pull/901` },
+      { kind: 'PR', number: 5366, url: 'https://github.com/o/other/pull/5366' },
+    ])
+    expect(taskReference(r)?.number).toBe(901)
+  })
+
+  it('leaves the order alone when a URL does carry the declared number', () => {
+    // The ordinary shape — the agent re-declared with the PR it opened — so nothing is ahead of
+    // the created PR and the declaration adds no chip of its own.
+    expect(
+      taskReferences(
+        run({
+          pullRequestUrl: `${REPO}/pull/533`,
+          referencedPullRequestUrl: `${REPO}/pull/530`,
+          markerRefs: { pr: 533 },
+        }),
+      ).map((reference) => reference.number),
+    ).toEqual([533, 530])
+  })
+
+  it('keeps #526 with a declaration too: an issue-subject run adopts no stray PR', () => {
+    expect(
+      taskReferences(
+        run({
+          referencedPullRequestUrl: `${REPO}/pull/900`,
+          referencedIssueUrl: `${REPO}/issues/524`,
+          markerRefs: { issue: 524 },
+        }),
+        REPO,
+      ),
+    ).toEqual([{ kind: 'Issue', number: 524, url: `${REPO}/issues/524` }])
+  })
+
+  it('is what taskReference takes its single answer from', () => {
+    const r = run({ pullRequestUrl: `${REPO}/pull/7`, referencedIssueUrl: `${REPO}/issues/4` })
+    expect(taskReference(r)).toEqual(taskReferences(r)[0])
+  })
+
+  it('keeps #526: an issue-subject run with no PR of its own adopts no stray PR', () => {
+    // Not even as a SECOND reference — a false association is false however many chips it sits
+    // beside.
+    expect(
+      taskReferences(
+        run({
+          referencedPullRequestUrl: `${REPO}/pull/900`,
+          referencedIssueUrl: `${REPO}/issues/524`,
+          markerRefs: { issue: 524 },
+        }),
+      ),
+    ).toEqual([{ kind: 'Issue', number: 524, url: `${REPO}/issues/524` }])
+  })
+
+  it('dedupes one reference reached through two fields', () => {
+    expect(
+      taskReferences(run({ pullRequestUrl: `${REPO}/pull/7`, prNumber: 7 })),
+    ).toEqual([{ kind: 'PR', number: 7, url: `${REPO}/pull/7` }])
+  })
+
+  it('keeps a PR and an issue that happen to share a number', () => {
+    // Different things — deduping on the number alone would silently drop one.
+    const refs = taskReferences(
+      run({ pullRequestUrl: `${REPO}/pull/12`, referencedIssueUrl: `${REPO}/issues/12` }),
+    )
+    expect(refs.map((reference) => reference.kind)).toEqual(['PR', 'Issue'])
+  })
+
+  it('falls back to a number known before any URL was scraped', () => {
+    expect(taskReferences(run({ prNumber: 42 }))).toEqual([{ kind: 'PR', number: 42 }])
+  })
+
+  it('makes a number-only reference clickable from the project’s own repo', () => {
+    // The cross-project case: the global page has a different repo per row, so it passes each
+    // project's `repoUrl` and every chip becomes a link instead of inert text.
+    expect(taskReferences(run({ prNumber: 42, issueNumber: 12 }), REPO)).toEqual([
+      { kind: 'PR', number: 42, url: `${REPO}/pull/42` },
+      { kind: 'Issue', number: 12, url: `${REPO}/issues/12` },
+    ])
+  })
+
+  it('never invents a URL without a repo to build it from', () => {
+    // Inert text beats a link that goes somewhere made up.
+    expect(taskReferences(run({ prNumber: 42 }), undefined)).toEqual([{ kind: 'PR', number: 42 }])
+  })
+
+  it('prefers the real URL over a synthesized one', () => {
+    // A task's PR can live in another repo (a fork, a submodule); the scraped URL is the truth.
+    expect(
+      taskReferences(run({ pullRequestUrl: 'https://github.com/other/repo/pull/9' }), REPO),
+    ).toEqual([{ kind: 'PR', number: 9, url: 'https://github.com/other/repo/pull/9' }])
+  })
+
+  it('is empty when the task references nothing', () => {
+    expect(taskReferences(run())).toEqual([])
   })
 })
 

@@ -19,12 +19,14 @@ const PROVIDERS = [
   { id: 'claude', label: 'Claude Code', login: 'claude auth login' },
   { id: 'codex', label: 'Codex', login: 'codex login' },
   { id: 'opencode', label: 'OpenCode', login: 'opencode auth login' },
+  { id: 'pi', label: 'pi', login: 'pi /login' },
 ] as const
 
 const providerWriteState = <T,>(value: T): Record<ProviderId, T> => ({
   claude: value,
   codex: value,
   opencode: value,
+  pi: value,
 })
 
 const STATUS_PRESENTATION = {
@@ -138,7 +140,10 @@ export function ProviderSettings() {
   )
 
   const connect = useMutation({
-    mutationFn: connectProvider,
+    // Wrapped, not passed bare: react-query hands the mutation fn a second argument (its context),
+    // which would now land in `connectProvider`'s optional `profileId` and aim this card's Connect
+    // at an account id that is not one. The Providers card is always the DISCOVERED account.
+    mutationFn: (provider: ProviderId) => connectProvider(provider),
     onSuccess: async (result) => {
       setManual(null)
       toast(

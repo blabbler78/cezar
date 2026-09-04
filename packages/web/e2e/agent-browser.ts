@@ -15,6 +15,16 @@ import { dirname, resolve } from 'node:path'
 const repoRoot = resolve(import.meta.dirname, '../../..')
 const descriptorPath = resolve(repoRoot, '.ai/qa/test-env.json')
 
+/**
+ * The built CLI a spec spawns when it needs its OWN cezar rather than the shared test env
+ * (a pinned `runs.json` fixture, an empty repo, a second project).
+ *
+ * Exported from here rather than re-derived per spec because it is one fact about the build
+ * layout, and it has already moved once: `npm run build` emits the server into the workspace
+ * package (`packages/cezar/dist`), not into a root-level `dist/`.
+ */
+export const cezarCli = resolve(repoRoot, 'packages/cezar/dist/index.js')
+
 type EnvDescriptor = {
   baseUrl: string
   browser: { installed: boolean; command: string; version: string; notes: string }
@@ -51,7 +61,40 @@ export function fixtureServeEnv(
   dataRoot: string,
   extra: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
-  return { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: resolve(dataRoot, '.cez-home'), ...extra }
+  return {
+    ...process.env,
+    // One line on purpose: the `fixture-serve-must-pin-cez-home` design guardian reads these
+    // two together, and a CEZ_DRY_RUN without CEZ_HOME beside it is exactly the mistake it
+    // exists to catch.
+    CEZ_DRY_RUN: '1', CEZ_HOME: resolve(dataRoot, '.cez-home'),
+    // A fixture repo must hold exactly the skills the fixture wrote. Open Mercato skill updates
+    // are default-on (AGENTS.md § Zero config), so a boot inside the six-hour window installs the
+    // whole `om-*` collection INTO the fixture and every "these are the project skills"
+    // assertion starts depending on the machine's cache and network. The shared test env
+    // (`skills-update.e2e.ts` attaches to it) is where that behaviour is exercised on purpose;
+    // `extra` can still turn it back on for a spec that wants it.
+    CEZ_SKILLS_AUTO_UPDATE: '0',
+    ...extra,
+  }
+}
+
+/**
+ * A JSON GET that survives a RESET idle connection.
+ *
+ * Specs boot a server, drive the browser for tens of seconds, then read the API back. Node's
+ * fetch pools the connection opened during the health probe, and reusing a socket the server has
+ * since closed surfaces as `ECONNRESET` — a dead connection, never a dead server (the process is
+ * still answering the browser at that moment). One retry opens a fresh one.
+ */
+export async function getJson<T>(url: string): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return (await (await fetch(url)).json()) as T
+    } catch (error) {
+      if (attempt >= 2) throw error
+      await new Promise((r) => setTimeout(r, 250))
+    }
+  }
 }
 
 /**
@@ -170,6 +213,22 @@ export class AgentBrowser {
   tapAt(x: number, y: number): void {
     this.run(['mouse', 'move', String(x), String(y)])
     this.run(['mouse', 'down'])
+    this.run(['mouse', 'up'])
+  }
+
+  /** operation: interact (`mouse move`/`down`/`up`) — press at one viewport coordinate, move to
+   *  another, release. A real, trusted pointer stream, which is the only kind that can exercise
+   *  a drag built on pointer capture (`setPointerCapture` rejects a pointer id the browser is
+   *  not actually tracking, so a synthetically dispatched PointerEvent cannot test one).
+   *
+   *  The intermediate move exists because a single jump from press to release is indistinguishable
+   *  from a click for anything that samples movement — the sidebar's resize handle reads each
+   *  move, so it needs more than one. */
+  dragTo(from: { x: number; y: number }, to: { x: number; y: number }): void {
+    this.run(['mouse', 'move', String(from.x), String(from.y)])
+    this.run(['mouse', 'down'])
+    this.run(['mouse', 'move', String(Math.round((from.x + to.x) / 2)), String(Math.round((from.y + to.y) / 2))])
+    this.run(['mouse', 'move', String(to.x), String(to.y)])
     this.run(['mouse', 'up'])
   }
 

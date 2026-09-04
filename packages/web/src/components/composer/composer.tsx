@@ -484,6 +484,11 @@ export function Composer({
 
           <textarea
             ref={textareaRef}
+            // `rows` is the phone case's floor, not the height: it is deliberately not
+            // responsive, so the height comes from the `min-h`/`md:min-h` pair below (44px
+            // phone, 54px desktop) and from the `useLayoutEffect` autosize pass. On desktop
+            // that means one intrinsic row for the single paint before autosize runs, which
+            // `md:min-h-[54px]` already bounds. This textarea is shared with `/new`.
             rows={1}
             value={text}
             disabled={disabled}
